@@ -1,0 +1,20 @@
+Wed Mar 18 05:11:31 2026  Rob Lauer  <rclauer@gmail.com>
+
+	[2.0.0]:
+	* .gitignore: new
+	* ChangeLog: new
+	* Makefile: new
+	* README.md: new
+	* VERSION: new
+	* bin/plambda.pl.in: new
+	* buildspec.yml: new
+	* lib/Amazon/Lambda/Context.pm.in: new
+	* lib/Amazon/Lambda/Runtime.pm.in: new
+	* provides: new
+	* release-notes.mk: new
+	* requires: new
+	* t/00-runtime.t: new
+	* test-requires: new
+	* version.mk: new
+
+

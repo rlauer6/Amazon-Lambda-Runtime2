@@ -1,0 +1,6 @@
+*.gz
+**/*.pm
+*.tmp
+resources
+extra-files
+**/*.pl

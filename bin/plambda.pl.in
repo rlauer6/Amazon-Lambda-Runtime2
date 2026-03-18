@@ -1,0 +1,42 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+########################################################################
+sub main {
+########################################################################
+
+  my ($lambda) = @_;
+
+  require "$lambda.pm";
+
+  return $lambda->new->run;
+}
+
+exit main();
+
+1;
+
+__END__
+
+=pod
+
+=head1 NAME
+
+plambda.pl
+
+=head1 SYNOPSIS
+
+ plambda.pl $module
+
+=head1 DESCRIPTION
+
+Stub driver that invokes your AWS Lambda method.  Part of the Perl
+Lambda Runtime system.
+
+=head1 AUTHOR
+
+Rob Lauer - <rlauer@treasurersbriefcase.com>
+
+=cut
