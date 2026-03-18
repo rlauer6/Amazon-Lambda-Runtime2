@@ -6,7 +6,7 @@ Amazon::Lambda::Runtime
 
     package Lambda;
 
-    use strrict;
+    use strict;
     use warnings;
 
     use parent qw(Amazon::Lambda::Runtime);
@@ -120,7 +120,7 @@ indicate an error condition.  You can however use the
 `send_invocation_error()` to indicate an error and a message in a
 more graceful way.
 
-## send\_invocation\_reponse
+## send\_invocation\_response
 
     send_invocation_response(response)
 

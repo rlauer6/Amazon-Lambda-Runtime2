@@ -16,7 +16,8 @@ PERL_MODULES = \
     lib/Amazon/Lambda/Context.pm
 
 BIN_FILES = \
-    bin/plambda.pl
+    bin/plambda.pl \
+    bin/bootstrap
 
 TARBALL = Amazon-Lambda-Runtime2-$(VERSION).tar.gz
 
@@ -35,6 +36,9 @@ $(TARBALL): $(DEPS)
 
 README.md: lib/Amazon/Lambda/Runtime.pm
 	pod2markdown $< > $@
+
+bin/bootstrap: bin/bootstrap.in
+	sed -e 's/[@]PACKAGE_VERSION[@]/$(VERSION)/' < $< > $@
 
 include version.mk
 

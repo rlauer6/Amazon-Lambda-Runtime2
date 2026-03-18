@@ -1,3 +1,23 @@
+Wed Mar 18 05:55:01 2026  Rob Lauer  <rclauer@gmail.com>
+
+	[2.0.0]:
+	* .gitignore: +bootstrap
+        * bin/bootstrap.in: new
+        * Makefile: add above to build
+        * README.md: generated
+        * buildspec.yml: typo
+        * lib/Amazon/Lambda/Context.pm.in
+	- Class::Accessor::Fast
+        * lib/Amazon/Lambda/Runtime.pm.in
+	- not an Exporter
+	- use Readonly instead of constant
+	- pod typos
+	(new): accept hash or ref
+	(init_logger): default loglevel = 'info'
+	(send_init_error): pass parameters as hash
+	(_post_error): accept hash args
+        * requires: Class::Accessor::Fast
+
 Wed Mar 18 05:11:31 2026  Rob Lauer  <rclauer@gmail.com>
 
 	[2.0.0]:

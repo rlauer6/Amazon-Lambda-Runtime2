@@ -10,21 +10,30 @@ use Time::HiRes qw[gettimeofday tv_interval];
 __PACKAGE__->follow_best_practice;
 __PACKAGE__->mk_accessors(
   qw(
-    aws_request_id awsRequestId
-    client_context clientContext
-    deadlineMS deadline_ms
-    function_memory_size functionMemorySize
-    function_name functionName
-    function_version functionVersion
+    aws_request_id
+    awsRequestId
+    client_context
+    clientContext
+    deadlineMS
+    deadline_ms
+    function_memory_size
+    functionMemorySize
+    function_name
+    functionName
+    function_version
+    functionVersion
     headers
-    invoked_function_arn invokedFunctionArn
-    log_group_name logGroupName
-    log_stream_name logStreamName
+    invoked_function_arn
+    invokedFunctionArn
+    log_group_name
+    logGroupName
+    log_stream_name
+    logStreamName
     memory_limit_in_mb memoryLimitInMB
   )
 );
 
-use parent qw(Class::Accessor Exporter);
+use parent qw(Class::Accessor::Fast);
 
 our $VERSION = '@PACKAGE_VERSION@';
 
@@ -141,11 +150,11 @@ L<Amazon::Lambda::Runtime>
 
 =head1 AUTHOR
 
-Rob Lauer - <rlauer6@comcast.net>
+Rob Lauer - <rlauer@treasurersbriefcase.com>
 
-=head1 COPYRIGHT
+=head1 LICENSE
 
-(c) Copyright 2019-2024 Robert C. Lauer. All rights reserved.  This module
+(c) Copyright 2019-2026 Robert C. Lauer. All rights reserved.  This module
 is free software. It may be used, redistributed and/or modified under
 the same terms as Perl itself.
 

@@ -1,4 +1,4 @@
-Class::Accessor
+Class::Accessor::Fast
 Date::Format              2.24
 JSON                      4.10
 LWP::Protocol::https      6.14

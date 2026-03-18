@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# -*- mode: sh; -*-
+# VERSION: @PACKAGE_VERSION@
+
+set -oeu piplefail
+
+MODULE="$(echo $_HANDLER | cut -d. -f1)"
+
+/usr/local/bin/plambda.pl $MODULE

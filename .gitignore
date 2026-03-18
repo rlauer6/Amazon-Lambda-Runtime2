@@ -4,3 +4,4 @@
 resources
 extra-files
 **/*.pl
+bin/bootstrap

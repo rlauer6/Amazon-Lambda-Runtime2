@@ -4,8 +4,17 @@ use strict;
 use warnings;
 
 use Amazon::Lambda::Context;
+use Data::Dumper;
+use Date::Format;
+use English qw(-no_match_vars);
+use LWP::UserAgent;
+use LWP::Protocol::https;
+use Log::Log4perl;
+use Log::Log4perl::Level;
+use JSON;
+use Scalar::Util qw(reftype);
 
-use parent qw(Class::Accessor::Fast Exporter);
+use parent qw(Class::Accessor::Fast);
 
 __PACKAGE__->follow_best_practice;
 __PACKAGE__->mk_accessors(
@@ -24,16 +33,6 @@ __PACKAGE__->mk_accessors(
   )
 );
 
-use Data::Dumper;
-use Date::Format;
-use English qw(-no_match_vars);
-use LWP::UserAgent;
-use LWP::Protocol::https;
-use Log::Log4perl;
-use Log::Log4perl::Level;
-use JSON;
-use Scalar::Util qw(reftype);
-
 use Readonly;
 
 Readonly::Hash our %LOG4PERL_LEVELS => (
@@ -45,15 +44,11 @@ Readonly::Hash our %LOG4PERL_LEVELS => (
   fatal => $FATAL,
 );
 
-our @EXPORT;
-
-use constant {
-  INITIALIZATION_ERROR => 'http://%s/%s/runtime/init/error',
-  INVOCATION_ERROR     => 'http://%s/%s/runtime/invocation/%s/error',
-  INVOCATION_NEXT      => 'http://%s/%s/runtime/invocation/next',
-  INVOCATION_RESPONSE  => 'http://%s/%s/runtime/invocation/%s/response',
-  TIMEOUT              => 10,
-};
+Readonly::Scalar our $INITIALIZATION_ERROR => 'http://%s/%s/runtime/init/error';
+Readonly::Scalar our $INVOCATION_ERROR     => 'http://%s/%s/runtime/invocation/%s/error';
+Readonly::Scalar our $INVOCATION_NEXT      => 'http://%s/%s/runtime/invocation/next';
+Readonly::Scalar our $INVOCATION_RESPONSE  => 'http://%s/%s/runtime/invocation/%s/response';
+Readonly::Scalar our $TIMEOUT              => 10;
 
 our $VERSION = '@PACKAGE_VERSION@';
 
@@ -62,13 +57,15 @@ sub new {
 ########################################################################
   my ( $class, @args ) = @_;
 
-  my $self = $class->SUPER::new(@args);
+  my $options = ref $args[0] ? $args[0] : {@args};
+
+  my $self = $class->SUPER::new($options);
 
   $self->init_logger();
 
   $self->set_api_version('2018-06-01');
 
-  $self->set_time( $self->get_timeout // TIMEOUT );
+  $self->set_timeout( $self->get_timeout // $TIMEOUT );
 
   my $handler = ( split /[.]/xsm, $ENV{'_HANDLER'} )[1];
 
@@ -94,7 +91,7 @@ sub init_logger {
 ########################################################################
   my ($self) = @_;
 
-  my $loglevel = $self->get_loglevel;
+  my $loglevel = $self->get_loglevel // 'info';
 
   $loglevel = $LOG4PERL_LEVELS{$loglevel};
 
@@ -106,9 +103,10 @@ sub init_logger {
     }
   );
 
-  $self->set_logger( Log::Log4perl->get_logger );
+  my $logger = Log::Log4perl->get_logger;
+  $self->set_logger($logger);
 
-  return $self->get_logger;
+  return $logger;
 }
 
 ########################################################################
@@ -164,7 +162,7 @@ sub get_runtime_url {
 ########################################################################
   my ($self) = @_;
 
-  return sprintf INVOCATION_NEXT, $ENV{AWS_LAMBDA_RUNTIME_API}, $self->get_api_version;
+  return sprintf $INVOCATION_NEXT, $ENV{AWS_LAMBDA_RUNTIME_API}, $self->get_api_version;
 }
 
 ########################################################################
@@ -239,7 +237,7 @@ sub send_invocation_response {
   my ( $self, $response ) = @_;
 
   my $url = sprintf
-    INVOCATION_RESPONSE,
+    $INVOCATION_RESPONSE,
     $ENV{AWS_LAMBDA_RUNTIME_API},
     $self->get_api_version, $self->get_request_id;
 
@@ -257,12 +255,9 @@ sub send_init_error {
 ########################################################################
   my ( $self, $error_message, $error_type ) = @_;
 
-  my $url = sprintf
-    INITIALIZATION_ERROR,
-    $ENV{AWS_LAMBDA_RUNTIME_API},
-    $self->get_api_version;
+  my $url = sprintf $INITIALIZATION_ERROR, $ENV{AWS_LAMBDA_RUNTIME_API}, $self->get_api_version;
 
-  return $self->_post_error( $error_message, $error_type );
+  return $self->_post_error( url => $url, message => $error_message, type => $error_type );
 }
 
 ########################################################################
@@ -270,7 +265,7 @@ sub send_invocation_error {
 ########################################################################
   my ( $self, $error_message, $error_type ) = @_;
 
-  my $url = sprintf INVOCATION_ERROR, $ENV{AWS_LAMBDA_RUNTIME_API}, $self->get_api_version, $self->get_request_id;
+  my $url = sprintf $INVOCATION_ERROR, $ENV{AWS_LAMBDA_RUNTIME_API}, $self->get_api_version, $self->get_request_id;
 
   return $self->_post_error( $url, $error_message, $error_type );
 }
@@ -278,7 +273,9 @@ sub send_invocation_error {
 ########################################################################
 sub _post_error {
 ########################################################################
-  my ( $self, $url, $error_message, $error_type ) = @_;
+  my ( $self, %args ) = @_;
+
+  my ( $url, $error_message, $error_type ) = @args{qw(url message type)};
 
   my $error = { errorMessage => $error_message, errorType => $error_type };
 
@@ -308,7 +305,7 @@ Amazon::Lambda::Runtime
 
  package Lambda;
 
- use strrict;
+ use strict;
  use warnings;
 
  use parent qw(Amazon::Lambda::Runtime);
@@ -426,7 +423,7 @@ indicate an error condition.  You can however use the
 C<send_invocation_error()> to indicate an error and a message in a
 more graceful way.
 
-=head2 send_invocation_reponse
+=head2 send_invocation_response
 
  send_invocation_response(response)
 

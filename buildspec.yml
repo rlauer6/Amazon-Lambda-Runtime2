@@ -19,7 +19,7 @@ extra-files:
 resources:
   homepage: http://github.com/rlauer6/Amazon-Lambda-Runtime2.git
   bugtracker:
-    web: http://github.com/rlauer6/Amazon-Lambd-Runtime2/issues
+    web: http://github.com/rlauer6/Amazon-Lambda-Runtime2/issues
     mailto: rlauer@treasurersbriefcase.com
   repository:
     url: git://github.com/rlauer6/Amazon-Lambda-Runtime2.git
