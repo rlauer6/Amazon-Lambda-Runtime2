@@ -1,0 +1,129 @@
+#-*- mode: makefile; -*-
+SHELL := /bin/bash
+
+.SHELLFLAGS := -ec
+
+PERL_LAMBDA   ?= perl-lambda-poc
+AWS_PROFILE   ?= default
+REGION        ?= us-east-1
+REPO_NAME     ?= perl-lambda-poc
+FUNCTION_NAME ?= hello-perl
+ROLE_NAME     ?= lambda-role
+AWS_ACCOUNT   ?= $(shell aws sts get-caller-identity --profile $(AWS_PROFILE) --output text --query Account)
+
+LAMBDA_MODULE ?= HelloLambda.pm
+
+########################################################################
+# create Docker image
+########################################################################
+image: Dockerfile $(LAMBDA_MODULE)
+	docker build -f $< -t $(PERL_LAMBDA) . && \
+	docker inspect $(PERL_LAMBDA):latest > $@ || rm -f $@
+
+########################################################################
+# create ECR repository
+########################################################################
+ecr-repo:
+	@repo=$$(mktemp); \
+	if aws ecr describe-repositories \
+	        --profile $(AWS_PROFILE) \
+	        --query "repositories[?repositoryName=='$(REPO_NAME)'].repositoryName" \
+	        --output text 2>/dev/null | tee $$repo | grep -q $(REPO_NAME); then \
+	    echo "repo $(REPO_NAME) already exists"; \
+	else \
+	    aws ecr create-repository \
+	        --repository-name $(REPO_NAME) \
+	        --region $(REGION) \
+	        --profile $(AWS_PROFILE) > $$repo; \
+	fi; \
+	rm $$repo; \
+	aws ecr describe-repositories --profile $(AWS_PROFILE) \
+	    --query 'repositories[?repositoryName==`$(REPO_NAME)`].repositoryUri' \
+	    --output text >$@ || rm -f $@
+
+########################################################################
+# push image to ECR repository
+########################################################################
+deploy: ecr-repo image
+	aws ecr get-login-password --region $(REGION) --profile $(AWS_PROFILE) | \
+		docker login --username AWS --password-stdin $(AWS_ACCOUNT).dkr.ecr.$(REGION).amazonaws.com
+	URI=$$(cat ecr-repo); \
+	echo $$URI; \
+	docker tag $(REPO_NAME):latest $$URI:latest; \
+	docker push $$URI:latest > $@ || rm -f $@
+
+########################################################################
+# create Lambda role & policy
+########################################################################
+policy-document:
+	perl -MJSON -e 'print encode_json({Version => "2012-1-17", Statement => [ { Effect => "Allow", Principal => { Service => "lambda.amazonaws.com"}, Action => "sts:AssumeRole"}]});' > $@
+
+lambda-role: policy-document
+	@if aws iam get-role \
+	        --role-name $(ROLE_NAME) \
+	        --profile $(AWS_PROFILE) > $@ 2>/dev/null; then \
+	    echo "role $(ROLE_NAME) already exists"; \
+	else \
+	    aws iam create-role \
+	        --role-name $(ROLE_NAME) \
+	        --assume-role-policy-document file://$< \
+	        --profile $(AWS_PROFILE) > $@ && \
+	    aws iam attach-role-policy \
+	        --role-name $(ROLE_NAME) \
+	        --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole \
+	        --profile $(AWS_PROFILE) || rm -f $@; \
+	fi
+
+########################################################################
+# create/update Lambda function
+########################################################################
+lambda-function: ecr-repo lambda-role | deploy
+	@if aws lambda get-function \
+	        --function-name $(FUNCTION_NAME) \
+	        --profile $(AWS_PROFILE) > $@ 2>/dev/null; then \
+	    echo "function $(FUNCTION_NAME) already exists"; \
+	else \
+	    URI=$$(cat ecr-repo); \
+	    ROLE_PATH=$$(aws iam get-role --role-name lambda-role --profile $(AWS_PROFILE) --query 'Role.Path' --output text | sed -e 's/\///g;'); \
+	    aws lambda create-function \
+	        --function-name $(FUNCTION_NAME) \
+	        --package-type Image \
+	        --code ImageUri=$$URI:latest \
+	        --role arn:aws:iam::$(AWS_ACCOUNT):role/$$ROLE_PATH/$(ROLE_NAME) \
+	        --profile $(AWS_PROFILE) >$@ || rm -f $@; \
+	fi
+
+.PHONY: update-function
+
+update-function: deploy
+	DIGEST=$$(aws ecr describe-images \
+	    --repository-name $(REPO_NAME) \
+	    --profile $(AWS_PROFILE) \
+	    --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
+	    --output text); \
+	URI=$$(cat ecr-repo); \
+	aws lambda update-function-code \
+	    --function-name $(FUNCTION_NAME) \
+	    --image-uri $$URI@$$DIGEST \
+	    --profile $(AWS_PROFILE)
+	aws lambda wait function-updated \
+	    --function-name $(FUNCTION_NAME) \
+	    --profile $(AWS_PROFILE)
+
+########################################################################
+# invoke Lambda function
+########################################################################
+
+payload.json:
+	perl -MJSON -e 'print encode_json({message => "Hello World!"})' > $@
+
+invoke: lambda-function payload.json
+	aws lambda invoke \
+	    --function-name $(FUNCTION_NAME) \
+	    --payload file://payload.json \
+	    --cli-binary-format raw-in-base64-out \
+	    --profile $(AWS_PROFILE) \
+	    invoke && cat invoke
+
+clean:
+	rm -f image ecr-repo deploy lambda-role lambda-function invoke

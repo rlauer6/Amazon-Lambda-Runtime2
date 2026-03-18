@@ -5,3 +5,13 @@ resources
 extra-files
 **/*.pl
 bin/bootstrap
+uri
+ecr-repo
+deploy
+policy-document
+lambda-function
+lambda-role
+*.log
+invoke
+payload.json
+image

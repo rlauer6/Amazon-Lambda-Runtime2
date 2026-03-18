@@ -1,3 +1,26 @@
+Wed Mar 18 14:27:30 2026  Rob Lauer  <rclauer@gmail.com>
+
+	[2.0.0]:
+        * .gitignore
+	- uri, ecr-repo, deploy, policy-document, lambda-function,
+	- lambd-role, *.log, payload.json, image
+        * Dockerfile
+	- install Amazon::Lambda::Runtime from Darkpan or CPAN
+        * Makefile
+	- Amazon-Lambda-Runtime
+	- chmod +x scripts
+        * bin/bootstrap.in
+	- fix piplefail typo
+	- -I /var/task, exit 0
+        * bin/plambda.pl.in
+	- better error reporting
+	- use environment variable $_HANDLER if no argument
+	- pass @ARGV to main
+        * buildspec.yml
+	- +Makefile.poc, HelloLambda.pm
+        * Dockerfile: new
+        * Makefile.poc: new
+
 Wed Mar 18 05:55:01 2026  Rob Lauer  <rclauer@gmail.com>
 
 	[2.0.0]:

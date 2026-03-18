@@ -16,6 +16,8 @@ extra-files:
   - ChangeLog
   - share:
       - README.md
+      - Makefile.poc
+      - HelloLambda.pm
 resources:
   homepage: http://github.com/rlauer6/Amazon-Lambda-Runtime2.git
   bugtracker:

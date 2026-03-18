@@ -3,18 +3,40 @@
 use strict;
 use warnings;
 
+use English qw(-no_match_vars);
+use Data::Dumper;
+
 ########################################################################
 sub main {
 ########################################################################
 
   my ($lambda) = @_;
 
-  require "$lambda.pm";
+  $lambda = eval {
+    if ( !$lambda ) {
+      $lambda = $ENV{_HANDLER} // q{};
+
+      die "ERROR: usage: plambda.pl module-name\n"
+        if !$lambda;
+
+      ($lambda) = split /[.]/xsm, $lambda;
+    }
+
+    require "$lambda.pm";
+
+    return $lambda;
+  };
+
+  if ( !$lambda || $EVAL_ERROR ) {
+    print {*STDERR} "ERROR: Could not initialize runtime\n$EVAL_ERROR\n";
+    print {*STDERR} Dumper( [ env => \%ENV ] );
+    return 1;
+  }
 
   return $lambda->new->run;
 }
 
-exit main();
+exit main(@ARGV);
 
 1;
 

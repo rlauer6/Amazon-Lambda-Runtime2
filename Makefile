@@ -10,6 +10,7 @@ VERSION := $(shell cat VERSION)
 
 %.pl: %.pl.in
 	sed -e 's/[@]PACKAGE_VERSION[@]/$(VERSION)/' < $< > $@
+	chmod +x $@
 
 PERL_MODULES = \
     lib/Amazon/Lambda/Runtime.pm \
@@ -19,7 +20,7 @@ BIN_FILES = \
     bin/plambda.pl \
     bin/bootstrap
 
-TARBALL = Amazon-Lambda-Runtime2-$(VERSION).tar.gz
+TARBALL = Amazon-Lambda-Runtime-$(VERSION).tar.gz
 
 DEPS = \
     buildspec.yml \
@@ -39,6 +40,7 @@ README.md: lib/Amazon/Lambda/Runtime.pm
 
 bin/bootstrap: bin/bootstrap.in
 	sed -e 's/[@]PACKAGE_VERSION[@]/$(VERSION)/' < $< > $@
+	chmod +x $@
 
 include version.mk
 
