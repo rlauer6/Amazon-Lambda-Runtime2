@@ -15,3 +15,5 @@ lambda-role
 invoke
 payload.json
 image
+queue
+lambda-policies

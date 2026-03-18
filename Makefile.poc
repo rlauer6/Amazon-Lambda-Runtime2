@@ -56,7 +56,7 @@ deploy: ecr-repo image
 # create Lambda role & policy
 ########################################################################
 policy-document:
-	perl -MJSON -e 'print encode_json({Version => "2012-1-17", Statement => [ { Effect => "Allow", Principal => { Service => "lambda.amazonaws.com"}, Action => "sts:AssumeRole"}]});' > $@
+	perl -MJSON -e 'print encode_json({Version => "2012-10-17", Statement => [ { Effect => "Allow", Principal => { Service => "lambda.amazonaws.com"}, Action => "sts:AssumeRole"}]});' > $@
 
 lambda-role: policy-document
 	@if aws iam get-role \
@@ -67,17 +67,30 @@ lambda-role: policy-document
 	    aws iam create-role \
 	        --role-name $(ROLE_NAME) \
 	        --assume-role-policy-document file://$< \
-	        --profile $(AWS_PROFILE) > $@ && \
+	        --profile $(AWS_PROFILE) > $@ || rm -f $@; \
+	fi
+
+POLICIES_FILE ?= policies
+
+lambda-policies: lambda-role $(POLICIES_FILE)
+	@while read -r policy; do \
+	    [[ -z "$$policy" || "$$policy" =~ ^# ]] && continue; \
+	    echo "attaching $$policy"; \
 	    aws iam attach-role-policy \
 	        --role-name $(ROLE_NAME) \
-	        --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole \
-	        --profile $(AWS_PROFILE) || rm -f $@; \
-	fi
+	        --policy-arn $$policy \
+	        --profile $(AWS_PROFILE); \
+	done < $(POLICIES_FILE) && touch $@
+
+.PHONY: update-policies
+
+update-policies: $(POLICIES_FILE)
+	@$(MAKE) -f Makefile.poc lambda-policies
 
 ########################################################################
 # create/update Lambda function
 ########################################################################
-lambda-function: ecr-repo lambda-role | deploy
+lambda-function: ecr-repo lambda-policies | deploy
 	@if aws lambda get-function \
 	        --function-name $(FUNCTION_NAME) \
 	        --profile $(AWS_PROFILE) > $@ 2>/dev/null; then \
@@ -125,5 +138,47 @@ invoke: lambda-function payload.json
 	    --profile $(AWS_PROFILE) \
 	    invoke && cat invoke
 
+QUEUE_NAME ?= lambda-runtime
+BATCH_SIZE ?= 10
+
+########################################################################
+# create event source mapping for SQS queue
+########################################################################
+queue:
+	queue=$$(aws sqs list-queues --query 'QueueUrls[?contains(@, `$(QUEUE_NAME)`)]|[0]' \
+	  --output text --profile $(AWS_PROFILE) >$@ 2>/dev/null); \
+	if [[ "$$queue" = "None" ]]; then \
+	  aws sqs create-queue --queue-name $(QUEUE_NAME) > $@; \
+	else \
+	  echo "$(QUEUE_NAME) already exists"; \
+	fi
+
+lambda-sqs-trigger: lambda-function queue
+	@if aws lambda list-event-source-mappings \
+	        --function-name $(FUNCTION_NAME) \
+	        --event-source-arn arn:aws:sqs:$(REGION):$(AWS_ACCOUNT):$(QUEUE_NAME) \
+	        --profile $(AWS_PROFILE) \
+	        --query 'EventSourceMappings[0].UUID' \
+	        --output text 2>/dev/null >$@ | grep -qv None; then \
+	    echo "SQS trigger already exists for $(QUEUE_NAME)"; \
+	else \
+	    aws lambda create-event-source-mapping \
+	        --function-name $(FUNCTION_NAME) \
+	        --event-source-arn arn:aws:sqs:$(REGION):$(AWS_ACCOUNT):$(QUEUE_NAME) \
+	        --batch-size $(BATCH_SIZE) \
+	        --profile $(AWS_PROFILE); > $@ || rm -f $@\
+	fi
+
+CLEANFILES = \
+    deploy \
+    ecr-repo \
+    image \
+    invoke \
+    lambda-function \
+    lambda-policies \
+    lambda-role \
+    payload.json \
+    queue
+
 clean:
-	rm -f image ecr-repo deploy lambda-role lambda-function invoke
+	rm -f $(CLEANFILES)

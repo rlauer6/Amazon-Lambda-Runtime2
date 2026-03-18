@@ -46,6 +46,16 @@ include version.mk
 
 include release-notes.mk
 
+CLEANFILES = \
+    $(BIN_FILES) \
+    $(PERL_MODULES) \
+    *.tar.gz \
+    *.tmp \
+    extra-files \
+    provides \
+    resources \
+    resources \
+    release-*.{lst,diffs}
+
 clean:
-	rm -f $(PERL_MODULES) $(BIN_FILES) *.tmp extra-files resources *.tar.gz
-	rm -f release-*.{lst,diffs}
+	rm -f $(CLEANFILES)

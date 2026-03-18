@@ -18,6 +18,8 @@ extra-files:
       - README.md
       - Makefile.poc
       - HelloLambda.pm
+      - Dockerfile
+      - policies
 resources:
   homepage: http://github.com/rlauer6/Amazon-Lambda-Runtime2.git
   bugtracker:
