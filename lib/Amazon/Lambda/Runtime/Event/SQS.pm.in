@@ -1,0 +1,168 @@
+package Amazon::Lambda::Runtime::Event::SQS;
+
+use strict;
+use warnings;
+
+use parent qw(Amazon::Lambda::Runtime::Event::Base);
+
+use JSON qw(decode_json encode_json);
+
+our $VERSION = '@PACKAGE_VERSION@';
+
+########################################################################
+sub process {
+########################################################################
+  my ($self) = @_;
+
+  my $records = $self->get_records;
+
+  $self->get_logger->info( sprintf 'processing %d SQS record(s)', scalar @{$records} );
+
+  for my $record ( @{$records} ) {
+    my $body = $self->_unwrap($record);
+    $self->on_message( $body, $record );
+  }
+
+  return encode_json( { status => 'ok' } );
+}
+
+########################################################################
+sub _unwrap {
+########################################################################
+  my ( $self, $record ) = @_;
+
+  my $body = $record->{body};
+
+  # attempt JSON decode
+  my $decoded = eval { decode_json($body) };
+
+  return $body
+    if !$decoded;
+
+  # unwrap SNS envelope if present
+  if ( ( $decoded->{Type} // q{} ) eq 'Notification' ) {
+    $self->get_logger->debug('unwrapping SNS envelope');
+
+    my $message = eval { decode_json( $decoded->{Message} ) } // $decoded->{Message};
+
+    return $message;
+  }
+
+  return $decoded;
+}
+
+########################################################################
+sub on_message {
+########################################################################
+  my ( $self, $body, $record ) = @_;
+
+  $self->get_logger->warn( sprintf 'on_message() not implemented in %s', ref $self );
+
+  return;
+}
+
+1;
+
+__END__
+
+=pod
+
+=head1 NAME
+
+Amazon::Lambda::Runtime::Event::SQS - SQS event handler for Lambda
+
+=head1 SYNOPSIS
+
+ # simplest case - register and override one method
+ package MyApp::SQSHandler;
+
+ use parent qw(Amazon::Lambda::Runtime::Event::SQS);
+
+ sub on_message {
+   my ($self, $body, $record) = @_;
+   # $body is decoded - SNS envelope already unwrapped if present
+   # $record is the raw SQS record for metadata access
+ }
+
+ 1;
+
+ # register it in your Lambda class
+ package MyWorker;
+ use Amazon::Lambda::Runtime qw(:all);
+
+ use parent qw(Amazon::Lambda::Runtime);
+ 
+ __PACKAGE__->register_event_handler(
+   $EVENT_SQS => 'MyApp::SQSHandler'
+ );
+
+ 1;
+
+=head1 DESCRIPTION
+
+Handles SQS events delivered to a Lambda function. Iterates the
+C<Records> array, decodes each message body, and transparently
+unwraps SNS envelopes when present.
+
+Lambda polls the SQS queue on your behalf and delivers batches of
+messages. On successful handler completion Lambda deletes the
+messages automatically — no SQS client is required in your handler.
+
+=head1 METHODS
+
+=head2 process
+
+Iterates the SQS records, unwraps each message body, and calls
+C<on_message> for each one. Returns C<{"status":"ok"}>.
+
+=head2 on_message
+
+ on_message($body, $record)
+
+Stub method. Subclass C<Amazon::Lambda::Runtime::Event::SQS> and override
+this to implement your message processing logic.
+
+C<$body> is the decoded message payload. If the message arrived
+via SNS the envelope is already unwrapped — you receive the inner
+payload directly regardless of how the message was sent.
+
+C<$record> is the raw SQS record hashref, available if you need
+metadata such as C<messageId>, C<receiptHandle>, or
+C<messageAttributes>.
+
+=head1 SQS EXAMPLE EVENT STRUCTURE
+
+For reference the raw SQS event structure delivered by Lambda:
+
+ {
+   "Records": [
+     {
+       "messageId": "19dd0b57-b21e-4ac1-bd88-01bbb068cb78",
+       "receiptHandle": "MessageReceiptHandle",
+       "body": "Hello from SQS!",
+       "attributes": {
+         "ApproximateReceiveCount": "1",
+         "SentTimestamp": "1523232000000",
+         "SenderId": "123456789012",
+         "ApproximateFirstReceiveTimestamp": "1523232000001"
+       },
+       "messageAttributes": {},
+       "md5OfBody": "{{{md5_of_body}}}",
+       "eventSource": "aws:sqs",
+       "eventSourceARN": "arn:aws:sqs:us-east-1:123456789012:MyQueue",
+       "awsRegion": "us-east-1"
+     }
+   ]
+ }
+
+=head1 AUTHOR
+
+Rob Lauer - <rlauer@treasurersbriefcase.com>
+
+=head1 LICENSE
+
+(c) Copyright 2019-2026 Robert C. Lauer. All rights reserved. This
+module is free software. It may be used, redistributed and/or
+modified under the same terms as Perl itself.
+
+=cut

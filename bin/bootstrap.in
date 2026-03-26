@@ -2,10 +2,10 @@
 # -*- mode: sh; -*-
 # VERSION: @PACKAGE_VERSION@
 
-set -eou pipefail
+set -euo pipefail
 
-MODULE="$(echo $_HANDLER | cut -d. -f1)"
+LAMBDA_MODULE="${LAMBDA_MODULE:-}"
 
-perl -I /var/task /usr/local/bin/plambda.pl "$MODULE"
+/usr/local/bin/plambda.pl "$LAMBDA_MODULE"
 
 exit 0;

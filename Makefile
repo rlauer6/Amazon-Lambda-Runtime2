@@ -14,7 +14,14 @@ VERSION := $(shell cat VERSION)
 
 PERL_MODULES = \
     lib/Amazon/Lambda/Runtime.pm \
-    lib/Amazon/Lambda/Context.pm
+    lib/Amazon/Lambda/Runtime/Context.pm \
+    lib/Amazon/Lambda/Runtime/Event.pm \
+    lib/Amazon/Lambda/Runtime/Event/Base.pm \
+    lib/Amazon/Lambda/Runtime/Event/S3.pm \
+    lib/Amazon/Lambda/Runtime/Event/SNS.pm \
+    lib/Amazon/Lambda/Runtime/Event/SQS.pm \
+    lib/Amazon/Lambda/Runtime/Event/EventBridge.pm \
+    lib/Amazon/Lambda/Runtime/Writer.pm
 
 BIN_FILES = \
     bin/plambda.pl \
@@ -28,6 +35,7 @@ DEPS = \
     $(BIN_FILES) \
     requires \
     test-requires \
+    LambdaHandler.pm.in \
     README.md
 
 all: $(TARBALL)

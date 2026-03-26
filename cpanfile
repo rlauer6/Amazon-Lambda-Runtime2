@@ -1,0 +1,9 @@
+requires "Amazon::Lambda::Runtime", "0",
+url => "https://cpan.openbedrock.net/orepan2/authors/id/D/DU/DUMMY/Amazon-Lambda-Runtime-2.0.1.tar.gz";
+requires "Class::Accessor::Fast", "0";
+requires "Date::Format", "2.24";
+requires "JSON", "4.10";
+requires "Log::Log4perl", "1.57";
+requires "Readonly", "2.05";
+requires "Amazon::S3", "0";
+requires "Amazon::Credentials", "0";

@@ -9,29 +9,26 @@ use Data::Dumper;
 ########################################################################
 sub main {
 ########################################################################
-
   my ($lambda) = @_;
 
-  $lambda = eval {
-    if ( !$lambda ) {
-      $lambda = $ENV{_HANDLER} // q{};
+  ($lambda) = eval {
 
-      die "ERROR: usage: plambda.pl module-name\n"
-        if !$lambda;
+    die "no LAMBDA_MODULE defined in environment!\n"
+      if !$ENV{LAMBDA_MODULE};
 
-      ($lambda) = split /[.]/xsm, $lambda;
-    }
+    require "$ENV{LAMBDA_MODULE}";
 
-    require "$lambda.pm";
-
-    return $lambda;
+    return split /[.]pm\z/xsm, $ENV{LAMBDA_MODULE};
   };
 
   if ( !$lambda || $EVAL_ERROR ) {
     print {*STDERR} "ERROR: Could not initialize runtime\n$EVAL_ERROR\n";
     print {*STDERR} Dumper( [ env => \%ENV ] );
+
     return 1;
   }
+
+  $ENV{_HANDLER} = "$lambda.handler";
 
   return $lambda->new->run;
 }

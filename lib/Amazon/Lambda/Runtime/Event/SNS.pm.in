@@ -1,0 +1,148 @@
+package Amazon::Lambda::Runtime::Event::SNS;
+
+use strict;
+use warnings;
+
+use parent qw(Amazon::Lambda::Runtime::Event::Base);
+
+use JSON qw(decode_json encode_json);
+
+our $VERSION = '@PACKAGE_VERSION@';
+
+########################################################################
+sub process {
+########################################################################
+  my ($self) = @_;
+
+  my $records = $self->get_records;
+
+  $self->get_logger->info( sprintf 'processing %d SNS record(s)', scalar @{$records} );
+
+  for my $record ( @{$records} ) {
+    my $sns     = $record->{Sns};
+    my $topic   = $sns->{TopicArn}                        // q{};
+    my $message = eval { decode_json( $sns->{Message} ) } // $sns->{Message};
+
+    $self->on_notification( $message, $sns, $record );
+  }
+
+  return encode_json( { status => 'ok' } );
+}
+
+########################################################################
+sub on_notification {
+########################################################################
+  my ( $self, $message, $sns, $record ) = @_;
+
+  $self->get_logger->warn( sprintf 'on_notification() not implemented in %s', ref $self );
+
+  return;
+}
+
+1;
+
+__END__
+
+=pod
+
+=head1 NAME
+
+Amazon::Lambda::Runtime::Event::SNS - SNS event handler for Lambda
+
+=head1 SYNOPSIS
+
+ package MyApp::SNSHandler;
+
+ use parent qw(Amazon::Lambda::Runtime::Event::SNS);
+
+ sub on_notification {
+   my ($self, $message, $sns, $record) = @_;
+   # $message is the decoded SNS message payload
+   # $sns is the full SNS record (TopicArn, Subject, MessageAttributes etc.)
+   # $record is the raw Lambda record
+ }
+
+ 1;
+
+ package MyWorker;
+
+ use parent qw(Amazon::Lambda::Runtime);
+
+ __PACKAGE__->register_event_handler(
+   'aws:sns' => 'MyApp::SNSHandler'
+ );
+
+ 1;
+
+=head1 DESCRIPTION
+
+Handles SNS notifications delivered directly to a Lambda function.
+Iterates the C<Records> array, decodes the message payload, and
+calls C<on_notification> for each record.
+
+=head1 METHODS
+
+=head2 process
+
+Iterates the SNS records, decodes each message, and calls
+C<on_notification>. Returns C<{"status":"ok"}>.
+
+=head2 on_notification
+
+ on_notification($message, $sns, $record)
+
+Stub method. Override in your subclass.
+
+C<$message> is the decoded message payload — either a hashref if
+the message was JSON or a plain string otherwise.
+
+C<$sns> is the SNS notification hashref containing C<TopicArn>,
+C<Subject>, C<MessageAttributes>, C<Timestamp>, and other metadata.
+
+C<$record> is the raw Lambda record.
+
+=head1 SNS EXAMPLE EVENT STRUCTURE
+
+ {
+   "Records": [
+     {
+       "EventSource": "aws:sns",
+       "EventVersion": "1.0",
+       "EventSubscriptionArn": "arn:aws:sns:us-east-1:{{{accountId}}}:ExampleTopic",
+       "Sns": {
+         "Type": "Notification",
+         "MessageId": "95df01b4-ee98-5cb9-9903-4c221d41eb5e",
+         "TopicArn": "arn:aws:sns:us-east-1:123456789012:ExampleTopic",
+         "Subject": "example subject",
+         "Message": "example message",
+         "Timestamp": "1970-01-01T00:00:00.000Z",
+         "SignatureVersion": "1",
+         "Signature": "EXAMPLE",
+         "SigningCertUrl": "EXAMPLE",
+         "UnsubscribeUrl": "EXAMPLE",
+         "MessageAttributes": {
+           "Test": {
+             "Type": "String",
+             "Value": "TestString"
+           },
+           "TestBinary": {
+             "Type": "Binary",
+             "Value": "TestBinary"
+           }
+         }
+       }
+     }
+   ]
+ }
+
+=head1 AUTHOR
+
+Rob Lauer - <rlauer@treasurersbriefcase.com>
+
+=head1 LICENSE
+
+(c) Copyright 2019-2026 Robert C. Lauer. All rights reserved. This
+module is free software. It may be used, redistributed and/or
+modified under the same terms as Perl itself.
+
+=cut

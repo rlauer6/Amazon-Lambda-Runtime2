@@ -1,4 +1,4 @@
-package Amazon::Lambda::Context;
+package Amazon::Lambda::Runtime::Context;
 
 use strict;
 use warnings;
@@ -29,7 +29,8 @@ __PACKAGE__->mk_accessors(
     logGroupName
     log_stream_name
     logStreamName
-    memory_limit_in_mb memoryLimitInMB
+    memory_limit_in_mb
+    memoryLimitInMB
   )
 );
 
@@ -66,15 +67,15 @@ sub new {
   # context members from headers
   my $headers = $self->get_headers;
 
-  my $client_context = $headers->header('lambda-runtime-client-context');
+  my $client_context = $headers->{'lambda-runtime-client-context'};
 
   if ( $client_context && length $client_context ) {
     $self->set_cc_sn( 'client_context', from_json($client_context) );
   }
 
-  $self->set_cc_sn( 'invoked_function_arn', $headers->header('lambda-runtime-invoked-function-arn') );
-  $self->set_cc_sn( 'deadline_ms',          $headers->header('lambda-runtime-deadline-ms') );
-  $self->set_cc_sn( 'aws_request_id',       $headers->header('lambda-runtime-aws-request-id') );
+  $self->set_cc_sn( 'invoked_function_arn', $headers->{'lambda-runtime-invoked-function-arn'} );
+  $self->set_cc_sn( 'deadline_ms',          $headers->{'lambda-runtime-deadline-ms'} );
+  $self->set_cc_sn( 'aws_request_id',       $headers->{'lambda-runtime-aws-request-id'} );
 
   return $self;
 }
@@ -86,7 +87,7 @@ sub getRemainingTimeInMillis {
 
   my ( $s, $m ) = gettimeofday;
 
-  return $self->get_deadline - ( $m * 1000 );
+  return $self->get_deadline_ms - ( $m * 1000 );
 }
 
 ########################################################################
@@ -101,13 +102,13 @@ __END__
 
 =head1 NAME
 
-Amazon::Lambda::Context
+Amazon::Lambda::Runtime::Context
 
 =head1 SYNOPSIS
 
- my $context = new Amazon::Lambda::Context({ headers => });
+ my $context = Amazon::Lambda::Runtime::Context->new({ headers => });
 
-Provides the Lamda C<context> object to Lambda handlers.  Used
+Provides the Lambda C<context> object to Lambda handlers.  Used
 internally by C<Amazon::Lambda::Runtime> and should not be normally
 called by applications.
 
@@ -137,14 +138,14 @@ retrieve the same information.
 
 =head2 getRemainingTimeInMillis
 
-Returns the number of milliseconds remainging for your Lambda
+Returns the number of milliseconds remaining for your Lambda
 execution based on the C<deadline_ms> value in the context object.
 
 =head2 get_remaining_time_in_millis
 
 Snake case version of C<getRemainingTimeInMillis>.
 
-=head1 SEE OTHER
+=head1 SEE ALSO
 
 L<Amazon::Lambda::Runtime>
 

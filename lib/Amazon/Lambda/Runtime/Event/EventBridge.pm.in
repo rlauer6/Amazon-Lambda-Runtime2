@@ -1,0 +1,149 @@
+package Amazon::Lambda::Runtime::Event::EventBridge;
+
+use strict;
+use warnings;
+
+use parent qw(Amazon::Lambda::Runtime::Event::Base);
+
+use JSON qw(encode_json);
+
+our $VERSION = '@PACKAGE_VERSION@';
+
+########################################################################
+sub new {
+########################################################################
+  my ( $class, %args ) = @_;
+
+  my $self = $class->SUPER::new(%args);
+
+  # EventBridge has no Records array - the event itself is the record
+  $self->set_records( [ $args{event} ] );
+
+  return $self;
+}
+
+########################################################################
+sub process {
+########################################################################
+  my ($self) = @_;
+
+  my $event = $self->get_event;
+
+  my $detail_type = $event->{'detail-type'} // 'unknown';
+  my $source      = $event->{source}        // 'unknown';
+
+  $self->get_logger->info( sprintf 'processing EventBridge event [%s] from [%s]', $detail_type, $source );
+
+  $self->on_event( $detail_type, $event->{detail} // {}, $event, );
+
+  return encode_json( { status => 'ok' } );
+}
+
+########################################################################
+sub on_event {
+########################################################################
+  my ( $self, $detail_type, $detail, $event ) = @_;
+
+  $self->get_logger->warn( sprintf 'on_event() not implemented in %s', ref $self );
+
+  return;
+}
+
+1;
+
+__END__
+
+=pod
+
+=head1 NAME
+
+Amazon::Lambda::Runtime::Event::EventBridge - EventBridge event handler for Lambda
+
+=head1 SYNOPSIS
+
+ package MyApp::ScheduledHandler;
+
+ use parent qw(Amazon::Lambda::Runtime::Event::EventBridge);
+
+ sub on_event {
+   my ($self, $detail_type, $detail, $event) = @_;
+
+   # $detail_type is the event type e.g. 'Scheduled Event'
+   # $detail is the event detail hashref
+   # $event is the full EventBridge event
+ }
+
+ 1;
+
+ package MyWorker;
+
+ use parent qw(Amazon::Lambda::Runtime);
+
+ __PACKAGE__->register_event_handler(
+   'aws:events' => 'MyApp::ScheduledHandler'
+ );
+
+ 1;
+
+=head1 DESCRIPTION
+
+Handles EventBridge events delivered to a Lambda function including
+scheduled rules and custom event bus patterns.
+
+Unlike SQS, SNS, and S3 events, EventBridge events have no
+C<Records> array. The event itself is the payload. C<detail-type>
+identifies the event type and C<detail> contains the event-specific
+data.
+
+=head1 METHODS
+
+=head2 process
+
+Extracts C<detail-type> and C<detail> from the event and calls
+C<on_event>.
+
+=head2 on_event
+
+ on_event($detail_type, $detail, $event)
+
+Stub method. Override in your subclass.
+
+C<$detail_type> is the EventBridge event type string, e.g.
+C<Scheduled Event>, C<EC2 Instance State-change Notification>,
+or a custom type from your event bus.
+
+C<$detail> is the event detail hashref — the content varies by
+event type.
+
+C<$event> is the full EventBridge event hashref including C<source>,
+C<account>, C<region>, C<time>, and other metadata.
+
+=head1 EVENTBRIDGE EXAMPLE EVENT STRUCTURE
+
+For reference the EventBridge event structure delivered by Lambda:
+
+ {
+   "version": "0",
+   "id": "12345678-1234-1234-1234-123456789012",
+   "detail-type": "Scheduled Event",
+   "source": "aws.events",
+   "account": "123456789012",
+   "time": "2026-01-01T00:00:00Z",
+   "region": "us-east-1",
+   "resources": [
+     "arn:aws:events:us-east-1:123456789012:rule/my-rule"
+   ],
+   "detail": {}
+ }
+
+=head1 AUTHOR
+
+Rob Lauer - <rlauer@treasurersbriefcase.com>
+
+=head1 LICENSE
+
+(c) Copyright 2019-2026 Robert C. Lauer. All rights reserved. This
+module is free software. It may be used, redistributed and/or
+modified under the same terms as Perl itself.
+
+=cut

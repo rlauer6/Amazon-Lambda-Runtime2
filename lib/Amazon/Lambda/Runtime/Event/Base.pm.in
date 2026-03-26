@@ -1,0 +1,191 @@
+package Amazon::Lambda::Runtime::Event::Base;
+
+use strict;
+use warnings;
+
+use parent qw(Class::Accessor::Fast);
+
+__PACKAGE__->follow_best_practice;
+__PACKAGE__->mk_accessors(
+  qw(
+    context
+    event
+    logger
+    records
+    source
+  )
+);
+
+use JSON qw(encode_json);
+use Scalar::Util qw(reftype);
+
+our $VERSION = '@PACKAGE_VERSION@';
+
+########################################################################
+sub new {
+########################################################################
+  my ( $class, %args ) = @_;
+
+  my $self = $class->SUPER::new( \%args );
+
+  $self->set_records( $self->_build_records );
+
+  return $self;
+}
+
+########################################################################
+sub _build_records {
+########################################################################
+  my ($self) = @_;
+
+  my $event = $self->get_event;
+
+  return []
+    if !$event || !reftype($event) || reftype($event) ne 'HASH';
+
+  return $event->{Records} // [];
+}
+
+########################################################################
+sub process {
+########################################################################
+  my ($self) = @_;
+
+  $self->get_logger->warn( sprintf 'process() not implemented in %s', ref $self );
+
+  return encode_json(
+    { status => 'unhandled',
+      source => $self->get_source // 'unknown',
+    }
+  );
+}
+
+########################################################################
+sub each {
+########################################################################
+  my ( $self, $code ) = @_;
+
+  for my $record ( @{ $self->get_records } ) {
+    $code->($record);
+  }
+
+  return $self;
+}
+
+1;
+
+__END__
+
+=pod
+
+=head1 NAME
+
+Amazon::Lambda::Runtime::Event::Base - Base class for Lambda event objects
+
+=head1 SYNOPSIS
+
+ # returned by the factory when the event source is not recognized
+ my $event_obj = Amazon::Lambda::Runtime::Event->new(
+   event   => $event,
+   context => $context,
+   logger  => $self->get_logger,
+ );
+
+ # iterate records manually
+ $event_obj->each(sub {
+   my ($record) = @_;
+   # process record
+ });
+
+ # or dispatch via process()
+ return $event_obj->process;
+
+=head1 DESCRIPTION
+
+Base class for all C<Amazon::Lambda::Runtime::Event::*> objects. Provides
+common accessors and the C<each> iterator. Subclasses implement
+C<process> with event-source-specific unwrapping and dispatch.
+
+When the event source is not recognized the factory returns an
+instance of this class directly. Override C<process> in a subclass
+or use C<each> to iterate the raw records.
+
+=head1 METHODS
+
+=head2 new
+
+ new(%args)
+
+Constructor. Accepts a hash of named arguments.
+
+=over 4
+
+=item event
+
+The raw event hashref delivered by Lambda.
+
+=item context
+
+The L<Amazon::Lambda::Runtime::Context> object for this invocation.
+
+=item logger
+
+A L<Log::Log4perl> logger instance.
+
+=item source
+
+The detected event source string.
+
+=back
+
+=head2 process
+
+Stub. Subclasses override this to implement event-source-specific
+dispatch. The default implementation logs a warning and returns an
+C<unhandled> JSON response.
+
+=head2 each
+
+ $event_obj->each(sub { my ($record) = @_; ... });
+
+Iterates over the event records invoking the code reference for each
+one. Returns C<$self> for chaining.
+
+=head2 Accessors
+
+=over 4
+
+=item get_event / set_event
+
+The raw event hashref as delivered by Lambda.
+
+=item get_context / set_context
+
+The L<Amazon::Lambda::Runtime::Context> object for this invocation.
+
+=item get_logger / set_logger
+
+The L<Log::Log4perl> logger instance.
+
+=item get_records / set_records
+
+The C<Records> array from the event or an empty arrayref if the
+event has no records (e.g. EventBridge).
+
+=item get_source / set_source
+
+The detected event source string (e.g. C<aws:sqs>, C<aws:s3>).
+
+=back
+
+=head1 AUTHOR
+
+Rob Lauer - <rlauer@treasurersbriefcase.com>
+
+=head1 LICENSE
+
+(c) Copyright 2019-2026 Robert C. Lauer. All rights reserved. This
+module is free software. It may be used, redistributed and/or
+modified under the same terms as Perl itself.
+
+=cut

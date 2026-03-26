@@ -1,0 +1,100 @@
+package Amazon::Lambda::Runtime::Writer;
+
+use strict;
+use warnings;
+
+use parent qw(Class::Accessor::Fast);
+
+__PACKAGE__->follow_best_practice;
+__PACKAGE__->mk_accessors(qw( sock closed ));
+
+our $VERSION = '@PACKAGE_VERSION@';
+
+########################################################################
+sub write {
+########################################################################
+  my ( $self, $data ) = @_;
+
+  return if $self->get_closed;
+
+  my $sock = $self->get_sock;
+  my $len  = length $data;
+
+  printf {$sock} "%x\r\n", $len;
+  print  {$sock} $data;
+  print  {$sock} "\r\n";
+
+  return;
+}
+
+########################################################################
+sub close {
+########################################################################
+  my ($self) = @_;
+
+  return if $self->get_closed;
+
+  print { $self->get_sock } "0\r\n\r\n";
+
+  $self->set_closed(1);
+
+  return;
+}
+
+1;
+
+__END__
+
+=pod
+
+=head1 NAME
+
+Amazon::Lambda::Runtime::Writer - Streaming response writer for Lambda
+
+=head1 SYNOPSIS
+
+ sub handler {
+   my ($self, $event, $context) = @_;
+
+   return sub {
+     my ($writer) = @_;
+     $writer->write('{"chunk":1}');
+     $writer->write('{"chunk":2}');
+     $writer->close;
+   };
+ }
+
+=head1 DESCRIPTION
+
+Provides chunked HTTP response writing for Lambda streaming responses.
+Returned as a coderef from your handler when streaming is desired.
+
+Requires a Lambda Function URL configured with
+C<InvokeMode=RESPONSE_STREAM> or API Gateway HTTP API with streaming
+enabled. Direct CLI invocations and SQS/SNS/S3/EventBridge triggers
+do not support streaming.
+
+=head1 METHODS
+
+=head2 write( $data )
+
+Writes a chunk of data to the streaming response using HTTP chunked
+transfer encoding.
+
+=head2 close
+
+Sends the terminal chunk and marks the writer as closed. Called
+automatically by the runtime if your coderef returns without
+closing explicitly.
+
+=head1 AUTHOR
+
+Rob Lauer - <rlauer@treasurersbriefcase.com>
+
+=head1 LICENSE
+
+(c) Copyright 2019-2026 Robert C. Lauer. All rights reserved. This
+module is free software. It may be used, redistributed and/or
+modified under the same terms as Perl itself.
+
+=cut

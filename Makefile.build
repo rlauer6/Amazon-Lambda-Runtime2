@@ -3,43 +3,40 @@ SHELL := /bin/bash
 
 .SHELLFLAGS := -ec
 
-PERL_LAMBDA   ?= perl-lambda-poc
+VERSION := $(shell test -e VERSION && cat VERSION)
+
+PERL_LAMBDA   ?= perl-lambda
 AWS_PROFILE   ?= default
 REGION        ?= us-east-1
-REPO_NAME     ?= perl-lambda-poc
-FUNCTION_NAME ?= hello-perl
+REPO_NAME     ?= perl-lambda
+FUNCTION_NAME ?= lambda-handler
 ROLE_NAME     ?= lambda-role
 AWS_ACCOUNT   ?= $(shell aws sts get-caller-identity --profile $(AWS_PROFILE) --output text --query Account)
+NOCACHE       ?=
+PAYLOAD       ?= payload-sns.json
+TIMEOUT       ?= 30
+LAMBDA_MODULE ?= LambdaHandler.pm
 
-LAMBDA_MODULE ?= HelloLambda.pm
+LambdaHandler.pm: LambdaHandler.pm.in
+	version="$(VERSION)"; \
+	version="$${version:-1.0.0}"; \
+	sed -e "s/[@]PACKAGE_VERSION[@]/$$version/" $< > $@
 
 ########################################################################
 # create Docker image
 ########################################################################
-image: Dockerfile $(LAMBDA_MODULE)
-	docker build -f $< -t $(PERL_LAMBDA) . && \
+image: Dockerfile $(LAMBDA_MODULE) cpanfile cpanfile.snapshot
+	lambda_module_base=$$(basename $(LAMBDA_MODULE) .pm.in); \
+	lambda_module_base=$$(basename $$lambda_module_base .pm); \
+	lambda_module="$${lambda_module_base}.pm"; \
+	lambda_handler="$${lambda_module_base}.handler"; \
+	docker build $$NOCACHE \
+	  --build-arg LAMBDA_MODULE=$$lambda_module \
+	  --build-arg LAMBDA_HANDLER=$$lambda_handler \
+	  -f $< -t $(PERL_LAMBDA) . && \
 	docker inspect $(PERL_LAMBDA):latest > $@ || rm -f $@
 
-########################################################################
-# create ECR repository
-########################################################################
-ecr-repo:
-	@repo=$$(mktemp); \
-	if aws ecr describe-repositories \
-	        --profile $(AWS_PROFILE) \
-	        --query "repositories[?repositoryName=='$(REPO_NAME)'].repositoryName" \
-	        --output text 2>/dev/null | tee $$repo | grep -q $(REPO_NAME); then \
-	    echo "repo $(REPO_NAME) already exists"; \
-	else \
-	    aws ecr create-repository \
-	        --repository-name $(REPO_NAME) \
-	        --region $(REGION) \
-	        --profile $(AWS_PROFILE) > $$repo; \
-	fi; \
-	rm $$repo; \
-	aws ecr describe-repositories --profile $(AWS_PROFILE) \
-	    --query 'repositories[?repositoryName==`$(REPO_NAME)`].repositoryUri' \
-	    --output text >$@ || rm -f $@
+include ecr-create-repo.mk
 
 ########################################################################
 # push image to ECR repository
@@ -85,40 +82,45 @@ lambda-policies: lambda-role $(POLICIES_FILE)
 .PHONY: update-policies
 
 update-policies: $(POLICIES_FILE)
-	@$(MAKE) -f Makefile.poc lambda-policies
+	@$(MAKE) -f Makefile.build lambda-policies
 
 ########################################################################
 # create/update Lambda function
 ########################################################################
 lambda-function: ecr-repo lambda-policies | deploy
-	@if aws lambda get-function \
+	@function="$$(aws lambda get-function \
 	        --function-name $(FUNCTION_NAME) \
-	        --profile $(AWS_PROFILE) > $@ 2>/dev/null; then \
-	    echo "function $(FUNCTION_NAME) already exists"; \
-	else \
+	        --profile $(AWS_PROFILE) 2>&1)"; \
+	if echo "$$function" | grep -q 'ResourceNotFoundException'; then \
 	    URI=$$(cat ecr-repo); \
 	    ROLE_PATH=$$(aws iam get-role --role-name lambda-role --profile $(AWS_PROFILE) --query 'Role.Path' --output text | sed -e 's/\///g;'); \
-	    aws lambda create-function \
+	    function="$$(aws lambda create-function \
 	        --function-name $(FUNCTION_NAME) \
 	        --package-type Image \
+                --timeout $(TIMEOUT) \
 	        --code ImageUri=$$URI:latest \
 	        --role arn:aws:iam::$(AWS_ACCOUNT):role/$$ROLE_PATH/$(ROLE_NAME) \
-	        --profile $(AWS_PROFILE) >$@ || rm -f $@; \
-	fi
+	        --profile $(AWS_PROFILE))"; \
+	elif echo "$$function" | grep -q 'errorCode\|error\|Error'; then \
+	    echo "ERROR: get-function failed: $$function" >&2; \
+	    exit 1; \
+	fi; \
+	test -e $@ || echo "$$function" > $@
 
-.PHONY: update-function
-
-update-function: deploy
-	DIGEST=$$(aws ecr describe-images \
+image-digest: deploy
+	@aws ecr describe-images \
 	    --repository-name $(REPO_NAME) \
 	    --profile $(AWS_PROFILE) \
 	    --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
-	    --output text); \
+	    --output text > $@
+
+update-function: image-digest
+	@DIGEST=$$(cat $<); \
 	URI=$$(cat ecr-repo); \
 	aws lambda update-function-code \
 	    --function-name $(FUNCTION_NAME) \
 	    --image-uri $$URI@$$DIGEST \
-	    --profile $(AWS_PROFILE)
+	    --profile $(AWS_PROFILE) --no-cli-pager > $@
 	aws lambda wait function-updated \
 	    --function-name $(FUNCTION_NAME) \
 	    --profile $(AWS_PROFILE)
@@ -127,58 +129,73 @@ update-function: deploy
 # invoke Lambda function
 ########################################################################
 
-payload.json:
-	perl -MJSON -e 'print encode_json({message => "Hello World!"})' > $@
-
 invoke: lambda-function payload.json
-	aws lambda invoke \
+	@aws lambda invoke \
 	    --function-name $(FUNCTION_NAME) \
-	    --payload file://payload.json \
+	    --payload file://$(PAYLOAD).json \
 	    --cli-binary-format raw-in-base64-out \
 	    --profile $(AWS_PROFILE) \
 	    invoke && cat invoke
 
-QUEUE_NAME ?= lambda-runtime
-BATCH_SIZE ?= 10
 
 ########################################################################
-# create event source mapping for SQS queue
+# Test targets:
 ########################################################################
-queue:
-	queue=$$(aws sqs list-queues --query 'QueueUrls[?contains(@, `$(QUEUE_NAME)`)]|[0]' \
-	  --output text --profile $(AWS_PROFILE) >$@ 2>/dev/null); \
-	if [[ "$$queue" = "None" ]]; then \
-	  aws sqs create-queue --queue-name $(QUEUE_NAME) > $@; \
-	else \
-	  echo "$(QUEUE_NAME) already exists"; \
-	fi
+# SNS
+#   make -f Makefile.build test-sns
+########################################################################
+# SQS
+#   make -f Makefile.build lambda-sqs-trigger QUEUE_NAME=lambda-runtime
+#   aws sqs send-message \
+#     --queue-url https://sqs.us-east-1.amazonaws.com/311974035819/lambda-runtime \
+#     --message-body file://payload.json \
+#     --profile sandbox
+########################################################################
+# EventBridge
+#   make -f Makefile.build lambda-eventbridge-trigger
+#   make -f Makefile.build disable-eventbridge-rule
+#   make -f Makefile.build enable-eventbridge-rule
+#   make -f Makefile.build delete-eventbridge-rule
+########################################################################
+# S3
+#   make -f Makefile.build lambda-s3-trigger BUCKET_NAME=some-bucket
+#   aws s3 cp some-file s3://some-bucket/some-file
+########################################################################
 
-lambda-sqs-trigger: lambda-function queue
-	@if aws lambda list-event-source-mappings \
-	        --function-name $(FUNCTION_NAME) \
-	        --event-source-arn arn:aws:sqs:$(REGION):$(AWS_ACCOUNT):$(QUEUE_NAME) \
-	        --profile $(AWS_PROFILE) \
-	        --query 'EventSourceMappings[0].UUID' \
-	        --output text 2>/dev/null >$@ | grep -qv None; then \
-	    echo "SQS trigger already exists for $(QUEUE_NAME)"; \
-	else \
-	    aws lambda create-event-source-mapping \
-	        --function-name $(FUNCTION_NAME) \
-	        --event-source-arn arn:aws:sqs:$(REGION):$(AWS_ACCOUNT):$(QUEUE_NAME) \
-	        --batch-size $(BATCH_SIZE) \
-	        --profile $(AWS_PROFILE); > $@ || rm -f $@\
-	fi
+include streaming-test.mk
+
+include sns-test.mk
+
+include sqs-test.mk
+
+include s3-test.mk
+
+include eventbridge-test.mk
 
 CLEANFILES = \
     deploy \
     ecr-repo \
+    ecr-uri \
+    ecr-lifecycle-policy \
     image \
+    image-digest \
     invoke \
     lambda-function \
+    lambda-function-url \
+    lambda-function-url-permission \
+    lambda-function-url-invoke-permission \
     lambda-policies \
     lambda-role \
-    payload.json \
-    queue
+    lambda-s3-permission \
+    lambda-eventbridge-rule \
+    lambda-eventbridge-permission \
+    lambda-eventbridge-trigger \
+    lambda-sqs-trigger \
+    test-sns \
+    policy-document \
+    sqs-queue \
+    s3-bucket \
+    update-function
 
 clean:
 	rm -f $(CLEANFILES)

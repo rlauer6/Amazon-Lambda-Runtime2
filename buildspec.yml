@@ -16,10 +16,21 @@ extra-files:
   - ChangeLog
   - share:
       - README.md
-      - Makefile.poc
-      - HelloLambda.pm
+      - Makefile.build
+      - LambdaHandler.pm.in
       - Dockerfile
       - policies
+      - cpanfile
+      - cpanfile.snapshot
+      - sqs-test.mk
+      - s3-test.mk
+      - sns-test.mk
+      - streaming-test.mk
+      - eventbridge-test.mk
+      - payload-sns.json
+      - payload.json
+      - version.mk
+      - ecr-create-repo.mk
 resources:
   homepage: http://github.com/rlauer6/Amazon-Lambda-Runtime2.git
   bugtracker:

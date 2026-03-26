@@ -1,0 +1,208 @@
+package Amazon::Lambda::Runtime::Event;
+
+use strict;
+use warnings;
+
+use Amazon::Lambda::Runtime::Event::Base;
+use Amazon::Lambda::Runtime::Event::SQS;
+use Amazon::Lambda::Runtime::Event::SNS;
+use Amazon::Lambda::Runtime::Event::S3;
+use Amazon::Lambda::Runtime::Event::EventBridge;
+
+use Scalar::Util qw(reftype);
+
+our $VERSION = '@PACKAGE_VERSION@';
+
+use Readonly;
+
+Readonly::Scalar our $EVENT_SQS         => 'aws:sqs';
+Readonly::Scalar our $EVENT_SNS         => 'aws:sns';
+Readonly::Scalar our $EVENT_S3          => 'aws:s3';
+Readonly::Scalar our $EVENT_EVENTBRIDGE => 'aws:events';
+Readonly::Scalar our $FOO               => 'bar';
+
+our @EXPORT_OK = qw(
+  $EVENT_SQS
+  $EVENT_SNS
+  $EVENT_S3
+  $EVENT_EVENTBRIDGE
+  $FOO
+);
+
+our %EXPORT_TAGS = ( all => \@EXPORT_OK );
+
+my %DEFAULTS = (
+  $EVENT_SQS         => 'Amazon::Lambda::Runtime::Event::SQS',
+  $EVENT_SNS         => 'Amazon::Lambda::Runtime::Event::SNS',
+  $EVENT_S3          => 'Amazon::Lambda::Runtime::Event::S3',
+  $EVENT_EVENTBRIDGE => 'Amazon::Lambda::Runtime::Event::EventBridge',
+);
+
+use parent qw(Exporter);
+
+########################################################################
+sub new {
+########################################################################
+  my ( $class, %args ) = @_;
+
+  my $event  = $args{event};
+  my $source = $class->detect_source($event);
+
+  my $event_class = $args{class} // $DEFAULTS{$source} // 'Amazon::Lambda::Runtime::Event::Base';
+
+  return $event_class->new(
+    event   => $event,
+    context => $args{context},
+    logger  => $args{logger},
+    source  => $source,
+  );
+}
+
+########################################################################
+sub detect_source {
+########################################################################
+  my ( $class, $event ) = @_;
+
+  return q{}
+    if !$event || !reftype($event) || reftype($event) ne 'HASH';
+
+  # SQS, S3 use eventSource (lc), SNS uses EventSource (uc)
+  if ( my $records = $event->{Records} ) {
+    my $first = $records->[0] // {};
+    return $first->{eventSource}  # aws:sqs, aws:s3
+      // $first->{EventSource}  # aws:sns
+      // q{};
+  }
+
+  # EventBridge has no Records - identified by detail-type
+  return 'aws:events'
+    if $event->{'detail-type'};
+
+  return q{};
+}
+
+########################################################################
+sub defaults { return %DEFAULTS }
+########################################################################
+
+1;
+
+__END__
+
+=pod
+
+=head1 NAME
+
+Amazon::Lambda::Runtime::Event - Factory for Lambda event objects
+
+=head1 SYNOPSIS
+
+ use Amazon::Lambda::Runtime::Event;
+
+ # in your Lambda handler - default factory behavior
+ sub handler {
+   my ($self, $event, $context) = @_;
+
+   return Amazon::Lambda::Runtime::Event->new(
+     event   => $event,
+     context => $context,
+     logger  => $self->get_logger,
+   )->process;
+ }
+
+ # with a registered event handler class
+ sub handler {
+   my ($self, $event, $context) = @_;
+
+   return Amazon::Lambda::Runtime::Event->new(
+     event   => $event,
+     context => $context,
+     class   => 'MyApp::Event::SQS',
+     logger  => $self->get_logger,
+   )->process;
+ }
+
+=head1 DESCRIPTION
+
+Factory that detects the event source from the raw Lambda event
+hashref and returns the appropriate C<Amazon::Lambda::Runtime::Event::*>
+object. If the source is not recognized returns an
+C<Amazon::Lambda::Runtime::Event::Base> instance.
+
+In most cases you will not call this directly — the base class
+C<handler> method in C<Amazon::Lambda::Runtime> calls it
+automatically after consulting the event handler registry.
+
+=head1 METHODS
+
+=head2 new
+
+ Amazon::Lambda::Runtime::Event->new(%args)
+
+Detects the event source and returns the appropriate event object.
+
+=over 4
+
+=item event
+
+The raw event hashref delivered by Lambda. Required.
+
+=item context
+
+The L<Amazon::Lambda::Runtime::Context> object for this invocation.
+
+=item logger
+
+A L<Log::Log4perl> logger instance. Typically
+C<$self-E<gt>get_logger> from your handler.
+
+=item class
+
+Override the event class. Bypasses source detection and the default
+class map entirely:
+
+ Amazon::Lambda::Runtime::Event->new(
+   event  => $event,
+   class  => 'MyApp::Event::Custom',
+   logger => $self->get_logger,
+ );
+
+=back
+
+=head2 detect_source
+
+ Amazon::Lambda::Runtime::Event->detect_source($event)
+
+Detects and returns the event source string from the raw event
+hashref. Returns an empty string if the source cannot be determined.
+
+Available as a class method for use in custom C<handler>
+implementations.
+
+=head2 Supported Event Sources
+
+=over 4
+
+=item aws:sqs — L<Amazon::Lambda::Runtime::Event::SQS>
+
+=item aws:sns — L<Amazon::Lambda::Runtime::Event::SNS>
+
+=item aws:s3 — L<Amazon::Lambda::Runtime::Event::S3>
+
+=item aws:events — L<Amazon::Lambda::Runtime::Event::EventBridge>
+
+=item unknown — L<Amazon::Lambda::Runtime::Event::Base>
+
+=back
+
+=head1 AUTHOR
+
+Rob Lauer - <rlauer@treasurersbriefcase.com>
+
+=head1 LICENSE
+
+(c) Copyright 2019-2026 Robert C. Lauer. All rights reserved. This
+module is free software. It may be used, redistributed and/or
+modified under the same terms as Perl itself.
+
+=cut

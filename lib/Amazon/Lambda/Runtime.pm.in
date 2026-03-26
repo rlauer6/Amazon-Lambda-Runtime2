@@ -3,18 +3,22 @@ package Amazon::Lambda::Runtime;
 use strict;
 use warnings;
 
-use Amazon::Lambda::Context;
+use Amazon::Lambda::Runtime::Context;
+use Amazon::Lambda::Runtime::Event qw(:all);
+use Amazon::Lambda::Runtime::Writer;
 use Data::Dumper;
 use Date::Format;
 use English qw(-no_match_vars);
-use LWP::UserAgent;
-use LWP::Protocol::https;
+use HTTP::Tiny;
 use Log::Log4perl;
 use Log::Log4perl::Level;
 use JSON;
 use Scalar::Util qw(reftype);
 
-use parent qw(Class::Accessor::Fast);
+use parent qw(Class::Accessor::Fast Exporter);
+
+our @EXPORT_OK   = qw($EVENT_SQS $EVENT_SNS $EVENT_S3 $EVENT_EVENTBRIDGE);
+our %EXPORT_TAGS = ( all => \@EXPORT_OK );
 
 __PACKAGE__->follow_best_practice;
 __PACKAGE__->mk_accessors(
@@ -52,6 +56,41 @@ Readonly::Scalar our $TIMEOUT              => 10;
 
 our $VERSION = '@PACKAGE_VERSION@';
 
+my %EVENT_HANDLER_REGISTRY;
+
+########################################################################
+sub register_event_handler {
+########################################################################
+  my ( $class, $source, $handler_class ) = @_;
+
+  $EVENT_HANDLER_REGISTRY{$class}{$source} = $handler_class;
+
+  return $class;
+}
+
+########################################################################
+sub handler {
+########################################################################
+  my ( $self, $event, $context ) = @_;
+
+  my $source = Amazon::Lambda::Runtime::Event->detect_source($event);
+
+  my $handler_class = $EVENT_HANDLER_REGISTRY{ ref $self }{$source}  # registered handler
+    // do {  # factory default
+    my %defaults = Amazon::Lambda::Runtime::Event->defaults;
+    $defaults{$source} // 'Amazon::Lambda::Runtime::Event::Base';
+    };
+
+  $self->get_logger->info( sprintf 'source=%s handler_class=%s', $source // 'undef', $handler_class // 'undef' );
+
+  return $handler_class->new(
+    event   => $event,
+    context => $context,
+    logger  => $self->get_logger,
+    source  => $source,
+  )->process;
+}
+
 ########################################################################
 sub new {
 ########################################################################
@@ -81,7 +120,7 @@ sub new {
   # reset context object
   $self->set_context( {} );
 
-  $self->set_ua( LWP::UserAgent->new( timeout => $self->get_timeout ) );
+  $self->set_ua( HTTP::Tiny->new( timeout => $self->get_timeout ) );
 
   return $self;
 }
@@ -91,7 +130,7 @@ sub init_logger {
 ########################################################################
   my ($self) = @_;
 
-  my $loglevel = $self->get_loglevel // 'info';
+  my $loglevel = $self->get_loglevel // $ENV{LOG_LEVEL} // 'info';
 
   $loglevel = $LOG4PERL_LEVELS{$loglevel};
 
@@ -126,7 +165,8 @@ sub run {
       #
       # 1) die
       # 2) return undef
-      # 3) return a response
+      # 3) return a response string
+      # 4) return a coderef for streaming
       #
       # if they return undef, it is assumed they have sent the
       # response back themselves...
@@ -135,23 +175,59 @@ sub run {
 
       my $err = $EVAL_ERROR;
 
-      if ( !$response || $err ) {
-        if ($err) {
-          $self->get_logger->error($err);
-
-          $self->send_invocation_error( $err, 'Exception' );
-        }
+      if ($err) {
+        $self->get_logger->error($err);
+        $self->send_invocation_error( $err, 'Exception' );
       }
-      else {
-        $self->get_logger->debug(
-          sub {
-            return Dumper( [ response => $response ] );
-          }
-        );
-
+      elsif ( ref $response eq 'CODE' ) {
+        $self->get_logger->debug('streaming response');
+        $self->send_streaming_response($response);
+      }
+      elsif ($response) {
+        $self->get_logger->debug( sub { return Dumper( [ response => $response ] ) } );
         $self->send_invocation_response($response);
       }
     }
+  }
+
+  return;
+}
+
+########################################################################
+sub send_streaming_response {
+########################################################################
+  my ( $self, $coderef ) = @_;
+
+  require IO::Socket::INET;
+
+  my $host = $ENV{AWS_LAMBDA_RUNTIME_API};
+  my $path = sprintf '/2018-06-01/runtime/invocation/%s/response', $self->get_request_id;
+
+  my $sock = IO::Socket::INET->new(
+    PeerAddr => $host,
+    Proto    => 'tcp',
+  ) or die "could not connect to runtime API: $!";
+
+  print {$sock} "POST $path HTTP/1.1\r\n";
+  print {$sock} "Host: $host\r\n";
+  print {$sock} "Transfer-Encoding: chunked\r\n";
+  print {$sock} "Lambda-Runtime-Function-Response-Mode: streaming\r\n";
+  print {$sock} "Content-Type: application/octet-stream\r\n";
+  print {$sock} "\r\n";
+
+  my $writer = Amazon::Lambda::Runtime::Writer->new( { sock => $sock } );
+
+  eval { $coderef->($writer) };
+
+  my $err = $EVAL_ERROR;
+
+  $writer->close unless $writer->get_closed;
+
+  $sock->close;
+
+  if ($err) {
+    $self->get_logger->error("streaming error: $err");
+    die $err;
   }
 
   return;
@@ -185,20 +261,20 @@ sub next_event {
   );
 
   die 'could not read next event successfully'
-    if !$rsp->is_success;
+    if !$rsp->{success};
 
-  $self->set_event( from_json $rsp->content );
+  $self->set_event( from_json $rsp->{content} );
 
   $self->get_logger->info(
     sub {
-      return Dumper( [ event => $rsp->content ] );
+      return Dumper( [ event => $rsp->{content} ] );
     }
   );
 
-  my $headers = $rsp->headers;
+  my $headers = $rsp->{headers};
 
   # set context object
-  $self->set_context( Amazon::Lambda::Context->new( { headers => $headers } ) );
+  $self->set_context( Amazon::Lambda::Runtime::Context->new( { headers => $headers } ) );
 
   $self->set_event_headers($headers);
 
@@ -209,7 +285,7 @@ sub next_event {
   );
 
   # get request id
-  my ($request_id) = $headers->header('lambda-runtime-aws-request-id');
+  my $request_id = $headers->{'lambda-runtime-aws-request-id'};
   $self->set_request_id($request_id);
 
   $self->get_logger->debug(
@@ -222,16 +298,6 @@ sub next_event {
 }
 
 ########################################################################
-sub handler {
-########################################################################
-  my ($self) = @_;
-
-  $self->send_invocation_error( 'no handler defined', 'NoHandlerDefinedException' );
-
-  return;
-}
-
-########################################################################
 sub send_invocation_response {
 ########################################################################
   my ( $self, $response ) = @_;
@@ -241,13 +307,18 @@ sub send_invocation_response {
     $ENV{AWS_LAMBDA_RUNTIME_API},
     $self->get_api_version, $self->get_request_id;
 
-  my $result = $self->get_ua->post( $url, [], Content => $response );
+  my $result = $self->get_ua->post(
+    $url,
+    { content => $response,
+      headers => { 'Content-Type' => 'application/json' }
+    }
+  );
 
-  if ( $result->is_success ) {
+  if ( $result->{success} ) {
     $self->get_logger->debug( 'successfully sent response [' . $response . ']' );
   }
 
-  return $result->is_success;
+  return $result->{success};
 }
 
 ########################################################################
@@ -279,14 +350,19 @@ sub _post_error {
 
   my $error = { errorMessage => $error_message, errorType => $error_type };
 
-  my $result = $self->get_ua->post( $url, [], Content => to_json($error) );
+  my $result = $self->get_ua->post(
+    $url,
+    { content => to_json($error),
+      headers => { 'Content-Type' => 'application/json' }
+    }
+  );
 
-  if ( $result->is_success ) {
+  if ( $result->{success} ) {
     $self->get_logger->debug( 'successfully sent error [' . to_json( $error, { pretty => 1 } ) );
     $self->get_logger->debug( Dumper [$result] );
   }
 
-  return $result->is_success;
+  return $result->{success};
 }
 
 1;
@@ -301,114 +377,333 @@ Amazon::Lambda::Runtime
 
 =head1 SYNOPSIS
 
- package Lambda;
-
- use strict;
- use warnings;
-
- use parent qw(Amazon::Lambda::Runtime);
-
- sub handler {
-   my ($self, $event, $context) = @_;
-
-   return 'Hello World!';
- }
-
- 1;
-
-=head1 DESCRIPTION
-
-Base class for creating Perl based Lambda functions using the AWS
-Lambda Custom Runtime API. The runtime implements the polling loop
-that retrieves events from the Lambda service, invokes your handler,
-and returns responses or errors.
-
-This distribution uses a container image deployment model based on
-C<debian:trixie-slim>. No Amazon Linux or layer management is
-required.
-
-=head1 QUICK START
-
-=head2 1. Write your handler
-
-Create a Perl module that subclasses C<Amazon::Lambda::Runtime> and
-implements a C<handler> method:
-
  package MyLambda;
 
  use strict;
  use warnings;
+
  use parent qw(Amazon::Lambda::Runtime);
  use JSON qw(encode_json);
 
  sub handler {
    my ($self, $event, $context) = @_;
-
    return encode_json({ message => 'Hello!', input => $event });
  }
 
  1;
 
-The handler receives the decoded event as a hashref and an
-L<Amazon::Lambda::Context> object. It should return a JSON string.
 
-=head2 2. Create a Dockerfile
+=head1 DESCRIPTION
 
-A minimal Dockerfile for your Lambda:
+C<Amazon::Lambda::Runtime> provides a clean, transparent
+implementation of the AWS Lambda Custom Runtime API for Perl. Unlike
+other runtimes that rely on pre-built layers or specific Amazon Linux
+versions, this distribution is designed for a B<container-first
+deployment model>. You can use any Linux base image, such as
+C<debian:trixie-slim>, and manage your dependencies via a standard
+C<cpanfile>.
 
- FROM debian:trixie-slim
+=head2 The Execution Lifecycle
 
- RUN apt-get update && \
-     apt-get install -y --no-install-recommends \
-         perl libssl3 libexpat1 zlib1g ca-certificates \
-         gcc make libssl-dev libexpat-dev zlib1g-dev libperl-dev curl && \
-     curl -fsSL https://cpanmin.us | perl - App::cpanminus && \
-     cpanm --notest --no-man-pages Amazon::Lambda::Runtime && \
-     apt-get purge -y gcc make libssl-dev libexpat-dev libperl-dev curl && \
-     apt-get autoremove -y && apt-get clean && \
-     rm -rf /var/lib/apt/lists/* /root/.cpanm
+The runtime is invoked by the `bootstrap` script, which calls the
+`plambda.pl` driver. The driver performs the following steps:
 
- WORKDIR /var/task
- COPY MyLambda.pm /var/task/
+=over 4
+
+=item 1. Initialization: Locates your handler module via the
+C<LAMBDA_MODULE> environment variable and instantiates it.
+
+=item 2. The Event Loop: Calls the C<run()> method, which enters a
+C<while> loop to poll the Lambda Runtime API for new events.
+
+=item 3. Persistence: Because the C<run()> loop persists within the
+same process between "warm" invocations, you should initialize
+expensive resources (like database handles or AWS SDK objects) in your
+module's C<new()> constructor or as package-level lexical variables to
+benefit from re-use.
+
+=back
+
+=head2 Error Handling
+
+The runtime wraps your handler in an C<eval> block. 
+
+=over 4
+
+=item * If your handler B<dies>, the runtime catches the exception and
+automatically reports the C<$EVAL_ERROR> to the Lambda service as a
+function error.
+
+=item * For more controlled error reporting without crashing the
+process, use C<send_invocation_error($message, $type)>.
+
+=back
+
+=head2 Design Philosophy
+
+C<Amazon::Lambda::Runtime> is a Perl Lambda runtime environment you
+build using standard Perl tooling. The distribution includes a
+reference Dockerfile, C<Makefile.build>, and example handler templates
+to get you started quickly. Every component is visible, documented,
+and replaceable. Install it into your container image from CPAN like
+any other module. Use C<carton> or C<cpan> or C<cpanm> to install your
+dependencies.  Customize the Dockerfile to build your image. Nothing
+is hidden behind a pre-built base image or a layer ARN maintained by
+someone else.
+
+If you are evaluating Perl Lambda runtime options, you may find other
+implementations on CPAN. This one prioritizes transparency,
+compatibility with standard Perl idioms, and integration with existing
+Perl AWS infrastructure over convenience wrappers or pre-built images.
+If you can read a Perl class and a Dockerfile, you understand
+everything this distribution does.
+
+=head2 Event Framework
+
+C<Amazon::Lambda::Runtime> ships a structured event dispatch framework
+covering the four most common Lambda event sources - SQS, SNS, S3, and
+EventBridge. The base C<handler> method detects the event source and
+dispatches to the appropriate handler class via a registry.
+
+Register event handler classes in your Lambda module:
+
+ package MyLambda;
+
+ use parent qw(Amazon::Lambda::Runtime);
+ use Amazon::Lambda::Runtime::Event qw(:all);
+
+ __PACKAGE__->register_event_handler($EVENT_SQS => 'MyLambda::SQS');
+ __PACKAGE__->register_event_handler($EVENT_S3  => 'MyLambda::S3');
+
+ 1;
+
+ package MyLambda::SQS;
+
+ use parent qw(Amazon::Lambda::Runtime::Event::SQS);
+
+ sub on_message {
+   my ($self, $body, $record) = @_;
+   $self->get_logger->info("received: $body");
+ }
+
+ 1;
+
+There are three levels of customization - TIMTOWTDI:
+
+=over 4
+
+=item 1. Override C<handler> entirely and ignore the event framework.
+
+=item 2. Register event handler classes via C<register_event_handler>.
+The base C<handler> routes automatically.
+
+=item 3. Subclass an event object and override a single stub method.
+Pure business logic - no routing code required.
+
+=back
+
+Available event source constants (exported via C<:all>):
+
+ $EVENT_SQS         # aws:sqs
+ $EVENT_SNS         # aws:sns
+ $EVENT_S3          # aws:s3
+ $EVENT_EVENTBRIDGE # aws:events
+
+For sample event payloads for all supported event sources see:
+
+L<https://github.com/tschoffelen/lambda-sample-events>
+
+=head2 Streaming Responses
+
+Handlers can stream responses progressively by returning a coderef
+instead of a string. The runtime detects the coderef and switches to
+chunked HTTP transfer encoding via C<Amazon::Lambda::Runtime::Writer>:
+
+ sub handler {
+   my ($self, $event, $context) = @_;
+
+   return sub {
+     my ($writer) = @_;
+     $writer->write('{"chunk":1,"message":"Hello"}');
+     $writer->write('{"chunk":2,"message":"World"}');
+     $writer->close;
+   };
+ }
+
+Streaming requires a Lambda Function URL configured with
+C<InvokeMode=RESPONSE_STREAM> or API Gateway HTTP API with streaming
+enabled. Use C<make lambda-function-url> from C<streaming-test.mk>
+to create a public streaming endpoint.
+
+B<Note:> AWS accounts may require both C<lambda:InvokeFunctionUrl>
+and C<lambda:InvokeFunction> permissions for public Function URL
+access. Both are added by C<make lambda-function-url-permission> and
+C<make lambda-function-url-invoke-permission>. Direct CLI invocations,
+SQS, SNS, S3, and EventBridge triggers do not support streaming.
+
+See L<Amazon::Lambda::Runtime::Writer> for the full writer API.
+
+=head2 AWS X-Ray
+
+For distributed tracing add C<AWS::XRay> to your C<cpanfile>:
+
+ requires 'AWS::XRay';
+
+C<AWS::XRay> communicates with the X-Ray daemon via UDP on
+C<localhost:2000> - no additional HTTP dependencies are required.
+
+ use AWS::XRay qw(capture);
+
+ sub handler {
+   my ($self, $event, $context) = @_;
+   capture 'myApp' => sub {
+     # your code here
+   };
+ }
+
+See L<AWS::XRay> on CPAN for full usage details.
+
+=head2 Workflow Overview
+
+Deploying a Perl Lambda with C<Amazon::Lambda::Runtime> follows three
+distinct phases. C<Makefile.build> handles all three - run targets in
+order the first time, then use C<make update-function> for subsequent
+code changes.
+
+=head3 Phase 1 - Build the container image
+
+Lambda runs your handler inside an OCI-compliant container image. The
+image must contain:
+
+=over 4
+
+=item * A Perl interpreter and your CPAN dependencies
+
+=item * C<Amazon::Lambda::Runtime> and its modules
+
+=item * C<bootstrap> — the Lambda entrypoint, installed to
+F</usr/local/bin/bootstrap> by this distribution
+
+=item * C<plambda.pl> — the Perl driver that loads your handler module
+
+=item * Your handler module (e.g. F<LambdaHandler.pm>)
+
+=back
+
+The distribution ships a reference F<Dockerfile> in the C<share/>
+directory. The key final lines of the image build are:
+
+ ARG LAMBDA_MODULE=LambdaHandler.pm
+ COPY ${LAMBDA_MODULE} /usr/src/app/local/lib/perl5
+
+ ENV PERL5LIB=/usr/src/app/local/lib/perl5
+ ENV LAMBDA_MODULE=${LAMBDA_MODULE}
 
  ENTRYPOINT ["/usr/local/bin/bootstrap"]
- CMD ["MyLambda.handler"]
 
-C<bootstrap> is installed to F</usr/local/bin/bootstrap> by this
-distribution. The C<ENTRYPOINT> points directly to it — no symlink
-required.
+C<ENV LAMBDA_MODULE> tells C<bootstrap> which handler to
+load. C<ENTRYPOINT> points directly to the bootstrap — no C<CMD>
+override needed.
 
-The C<CMD> value sets C<$_HANDLER> which C<bootstrap> parses to
-determine the module name (C<MyLambda>) and the method (C<handler>).
+Build with:
 
-=head2 3. Deploy with Makefile.poc
+ make -f Makefile.build image
 
-This distribution includes a F<Makefile.poc> template in the share
-directory that handles the full deployment lifecycle. Copy it to your
-project directory:
+=head3 Phase 2 - Deploy and create the Lambda function
 
- cp $(perl -MFile::ShareDir=dist_file \
-     -e 'print dist_file("Amazon-Lambda-Runtime", "Makefile.poc")') \
-     Makefile
+Once the image is built it must be pushed to ECR and the Lambda
+function created or updated.
 
-Configure the variables at the top of the Makefile, then:
+For a first-time deployment:
 
- make lambda-function   # first-time setup: creates ECR repo, IAM role, and Lambda function
- make invoke            # test the function
- make update-function   # deploy a new image after changes
+ make -f Makefile.build lambda-function
 
-=head3 Makefile.poc Variables
+This runs the full dependency chain automatically:
+
+ ecr-repo => deploy => lambda-role => lambda-policies => lambda-function
+
+Each target is idempotent - re-running is always safe. Sentinel files
+track what has already been created so C<make> skips completed steps.
+
+To deploy a code change after editing your handler:
+
+ make -f Makefile.build update-function
+
+This rebuilds the image, pushes it to ECR using the image digest
+(never C<:latest>), and updates the Lambda function code. The function
+is ready when C<aws lambda wait function-updated> completes.
+
+To test your function:
+
+ make -f Makefile.build invoke
+
+This invokes the function with F<$(PAYLOAD)> and prints the response.
+
+=head3 Phase 3 - Configure event triggers
+
+Lambda functions are invoked by event sources. C<Makefile.build>
+includes included makefiles for the four most common trigger types.
+Include the ones you need in your project:
+
+ include sqs-test.mk         # SQS queue trigger
+ include sns-test.mk         # SNS direct invocation test
+ include s3-test.mk          # S3 bucket notification trigger
+ include eventbridge-test.mk # EventBridge scheduled rule trigger
+ include streaming-test.mk   # Lambda Function URL with streaming
+
+Each included makefile adds its own targets and variables. For
+example, to attach an SQS queue trigger:
+
+ make -f Makefile.build lambda-sqs-trigger QUEUE_NAME=my-queue
+
+To wire up an S3 bucket notification:
+
+ make -f Makefile.build lambda-s3-trigger BUCKET_NAME=my-bucket
+
+To create a streaming Function URL:
+
+ make -f Makefile.build lambda-function-url
+ make -f Makefile.build test-streaming
+
+See the included makefiles in the C<share/> directory for the full
+set of targets and variables available for each trigger type.
+
+=head3 The policies File
+
+The F<policies> file controls which IAM managed policies are attached
+to the Lambda execution role. Add one policy ARN per line. Lines
+beginning with C<#> are treated as comments:
+
+ # required - CloudWatch logging
+ arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+ # uncomment for SQS trigger
+ # arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+
+ # uncomment for S3 read access
+ # arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+Apply changes at any time:
+
+ make -f Makefile.build update-policies
+
+B<Note:> Receiving an event from a service does not automatically
+grant permission to call that service's APIs. An S3 trigger allows
+Lambda to invoke your function — it does not allow your function to
+read or write S3 objects. Add the appropriate policies to the
+F<policies> file for any AWS APIs your handler calls directly.
+
+=head2 Makefile.build Variables
 
 =over 4
 
 =item PERL_LAMBDA
 
-Docker image name. Default: C<perl-lambda-poc>
+Docker image name. Default: C<perl-lambda>
 
 =item AWS_PROFILE
 
-AWS CLI profile. Default: C<default>. Can also be set in the
-environment.
+AWS CLI profile. Default: C<default>. Can also be set in the environment.
 
 =item REGION
 
@@ -416,11 +711,11 @@ AWS region. Default: C<us-east-1>
 
 =item REPO_NAME
 
-ECR repository name. Default: C<perl-lambda-poc>
+ECR repository name. Default: C<perl-lambda>
 
 =item FUNCTION_NAME
 
-Lambda function name. Default: C<hello-perl>
+Lambda function name. Default: C<lambda-handler>
 
 =item ROLE_NAME
 
@@ -428,35 +723,131 @@ IAM role name. Default: C<lambda-role>
 
 =item POLICIES_FILE
 
-Path to the policies file containing IAM managed policy ARNs to
-attach to the Lambda execution role. Default: C<policies>. See
-L</The policies File>.
+Path to the policies file. Default: C<policies>. See L</The policies File>.
 
 =item AWS_ACCOUNT
 
-AWS account ID. If not set in the environment, resolved automatically
-via C<aws sts get-caller-identity>. Set this in your environment to
-avoid the extra API call on every C<make> invocation:
+AWS account ID. Resolved automatically via C<aws sts get-caller-identity>
+if not set in the environment.
 
- export AWS_ACCOUNT=$(aws sts get-caller-identity \
-     --query Account --output text --profile myprofile)
+ export AWS_ACCOUNT=$(aws get-caller-identity --query Account --output text --profile my-profile)
 
 =item LAMBDA_MODULE
 
-Your handler module filename. Default: C<HelloLambda.pm>
+Your handler module filename. Default: C<LambdaHandler.pm>
+
+=item PAYLOAD
+
+Payload file for C<make invoke> and C<make test-sns>. Default: C<payload.json>
 
 =item QUEUE_NAME
 
-SQS queue name for C<make lambda-sqs-trigger>. Default: C<my-queue>
+SQS queue name. Default: C<lambda-runtime>
 
 =item BATCH_SIZE
 
-Number of SQS messages delivered per Lambda invocation. Default: C<10>.
-Valid range is 1-10 for standard queues, 1-10000 for FIFO queues.
+SQS messages per invocation. Default: C<10>
+
+=item BUCKET_NAME
+
+S3 bucket name for C<make lambda-s3-trigger>. Default: C<my-bucket>
+
+=item S3_EVENT
+
+S3 event type. Default: C<s3:ObjectCreated:*>
+
+=item RULE_NAME
+
+EventBridge rule name. Default: C<lambda-handler-test>
+
+=item SCHEDULE_EXPRESSION
+
+EventBridge schedule. Default: C<rate(1 minute)>
+
+=item INVOKE_MODE
+
+Lambda Function URL invoke mode. Default: C<RESPONSE_STREAM>
+
+=item TIMEOUT
+
+Lambda startup time timeout value in seconds. Default: 30
 
 =back
 
-=head3 Makefile.poc Targets
+=head2 Primary Targets
+
+Targets you call directly:
+
+=over 4
+
+=item lambda-function
+
+First-time setup. Creates the ECR repository, IAM role, policies,
+builds and pushes the image, and creates the Lambda function.
+Run this once per function.
+
+=item update-function
+
+Deploy a code change. Rebuilds the image, pushes to ECR, and
+updates the Lambda function code. Use this whenever your handler
+or dependencies change.
+
+=item invoke
+
+Test the function with F<$(PAYLOAD)> and print the response.
+
+=item update-policies
+
+Re-attach policies after editing the F<policies> file.
+
+=item clean
+
+Remove all local sentinel files. AWS resources are not affected.
+
+=back
+
+=head2 Event Trigger Targets
+
+From the included makefiles:
+
+=item lambda-sqs-trigger
+
+Creates an SQS queue (C<QUEUE_NAME>) and attaches it as an event source.
+Requires C<AWSLambdaSQSQueueExecutionRole> in the F<policies> file.
+
+=item lambda-s3-trigger
+
+Configures S3 bucket notifications to trigger the Lambda on
+C<S3_EVENT> events.
+
+=item lambda-eventbridge-trigger
+
+Registers the Lambda function as the target of the EventBridge rule.
+
+=item enable-eventbridge-rule / disable-eventbridge-rule
+
+Enables or disables the EventBridge rule without deleting the
+infrastructure. Use C<make disable-eventbridge-rule> after testing
+to stop scheduled invocations.
+
+=item delete-eventbridge-rule
+
+Removes targets, deletes the rule, and removes local sentinel files.
+Targets must be removed before the rule can be deleted.
+
+=item lambda-function-url
+
+Creates a Lambda Function URL with C<auth-type NONE> and
+C<InvokeMode=$(INVOKE_MODE)>. Depends on both permission targets.
+
+=item test-streaming
+
+Invokes the Function URL with C<curl -sN> to test streaming responses.
+
+=head2 Internal Targets
+
+These are called automatically as dependencies. You should not
+need to invoke them directly:
 
 =over 4
 
@@ -466,290 +857,53 @@ Builds the Docker image from F<Dockerfile> and your handler module.
 
 =item ecr-repo
 
-Creates the ECR repository if it does not exist. Idempotent. The
-sentinel file contains the ECR repository URI used by subsequent
-targets.
+Creates the ECR repository if it does not exist. Idempotent. Sentinel
+file contains the ECR repository URI.
 
 =item deploy
 
-Logs in to ECR, tags and pushes the image using the image digest
-rather than the C<:latest> tag to ensure Lambda always pulls the
-correct image.
+Logs in to ECR, tags and pushes the image using the image digest rather
+than C<:latest> to ensure Lambda always pulls the correct image.
 
 =item policy-document
 
-Generates the IAM assume-role trust policy JSON document using Perl.
-Prerequisite for C<lambda-role>. The document grants
-C<lambda.amazonaws.com> permission to assume the role.
+Generates the IAM assume-role trust policy JSON document. Prerequisite
+for C<lambda-role>.
 
 =item lambda-role
 
-Creates the IAM role if it does not exist. Idempotent. Policy
-attachment is handled separately by C<lambda-policies>.
+Creates the IAM role if it does not exist. Idempotent.
 
 =item lambda-policies
 
-Attaches all policies listed in the F<policies> file to the Lambda
-execution role. The C<attach-role-policy> API is idempotent so this
-target can be run at any time safely. See L</The policies File>.
+Attaches all policies in the F<policies> file to the Lambda execution
+role. Idempotent - safe to run at any time.
 
-=item update-policies
+=item lambda-s3-permission
 
-Re-runs C<lambda-policies> to pick up any changes to the F<policies>
-file. Use this after adding new permissions for your handler.
+Grants S3 permission to invoke the Lambda function for the bucket
+specified by C<BUCKET_NAME>.
 
-=item lambda-function
+=item lambda-eventbridge-rule
 
-Creates the Lambda function if it does not exist. Depends on
-C<ecr-repo> and C<lambda-policies>, with C<deploy> as an order-only
-prerequisite — the image must exist in ECR at creation time but a
-new deploy does not force function recreation.
+Creates an EventBridge scheduled rule. Starts enabled.
 
-=item update-function
+=item lambda-eventbridge-permission
 
-Pushes a new image to ECR and updates the Lambda function code using
-the image digest. Waits for the function to become active before
-returning.
+Grants EventBridge permission to invoke the Lambda function.
 
-=item queue
+=item lambda-function-url-permission
 
-Creates the SQS queue named C<QUEUE_NAME> if it does not exist.
-Idempotent. Prerequisite for C<lambda-sqs-trigger>.
+Grants C<lambda:InvokeFunctionUrl> to C<*> principal for public
+Function URL access.
 
-=item lambda-sqs-trigger
+=item lambda-function-url-invoke-permission
 
-Attaches the Lambda function to the SQS queue specified by
-C<QUEUE_NAME> as an event source. Idempotent. Depends on both
-C<lambda-function> and C<queue>. Requires
-C<AWSLambdaSQSQueueExecutionRole> in the F<policies> file — run
-C<make update-policies> before creating the trigger.
-
-=item invoke
-
-Invokes the function with F<payload.json> and prints the response.
-
-=item clean
-
-Removes all local sentinel files including C<image>, C<ecr-repo>,
-C<deploy>, C<lambda-role>, C<lambda-function>, C<lambda-sqs-trigger>,
-C<policy-document>, C<queue>, and C<invoke>. AWS resources are not
-deleted.
+Grants C<lambda:InvokeFunction> to C<*> principal. Required in
+addition to C<lambda-function-url-permission> for public access on
+accounts with block public access enabled.
 
 =back
-
-=head2 The policies File
-
-The F<policies> file controls which IAM managed policies are attached
-to the Lambda execution role. It ships with this distribution as part
-of the F<Makefile.poc> project template.
-
-The file contains one policy ARN per line. Lines beginning with C<#>
-are treated as comments. A default F<policies> file is provided with
-the most commonly needed policies pre-commented:
-
- # Basic Lambda execution (CloudWatch logging) - required
- arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-
- # Event source triggers - uncomment as needed
- # arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
- # arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole
-
- # S3 access
- # arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
- # arn:aws:iam::aws:policy/AmazonS3FullAccess
-
-The F<policies> file is part of your project and should be version
-controlled alongside your handler code. To apply changes:
-
- make update-policies
-
-Since C<attach-role-policy> is idempotent, C<make update-policies>
-can be run at any time without side effects — policies already
-attached are silently skipped.
-
-=head2 Design Philosophy
-
-C<Amazon::Lambda::Runtime> takes a deliberately minimal approach.
-The distribution provides exactly three components: a base class
-that implements the Lambda Runtime API polling loop, a context
-object that surfaces Lambda invocation metadata, and a bootstrap
-script. Nothing more.
-
-Your handler is an ordinary Perl class that inherits from
-C<Amazon::Lambda::Runtime> and implements a C<handler> method.
-This means the full power of Perl's object system is available —
-override C<new> for initialization, compose roles, add methods,
-use any CPAN module you need. There is no framework to learn, no
-DSL to adopt, no exported magic.
-
-The container image deployment model means you choose your own
-base image. This distribution is developed and tested on
-C<debian:trixie-slim>, giving you a proper Linux distribution
-with a predictable package ecosystem rather than a cloud-vendor
-variant. Your development environment and your Lambda environment
-are the same.
-
-If you are evaluating Perl Lambda runtime options, you may find
-other implementations on CPAN. This one prioritizes simplicity,
-transparency, and compatibility with standard Perl idioms over
-convenience wrappers or pre-built infrastructure. If you can read
-a Perl class and a Dockerfile, you understand everything this
-distribution does.
-
-=head2 Handling Multiple Event Types
-
-A single Lambda function can handle multiple event types by
-dispatching on the event structure. This is particularly useful
-when processing SNS notifications that wrap S3 events, or when
-a single function serves as a general purpose handler for related
-S3 operations.
-
-The following pattern uses a dispatch table keyed on the S3 event
-name:
-
- package S3EventHandler;
-
- use strict;
- use warnings;
-
- use parent qw(Amazon::Lambda::Runtime);
-
- use JSON qw(encode_json decode_json);
-
- my %DISPATCH = (
-   's3:ObjectCreated:Put'                      => \&on_object_created,
-   's3:ObjectCreated:CompleteMultipartUpload'  => \&on_object_created,
-   's3:ObjectRemoved:Delete'                   => \&on_object_removed,
- );
-
- sub handler {
-   my ($self, $event, $context) = @_;
-
-   for my $record (@{$event->{Records}}) {
-
-     # unwrap SNS envelope if present
-     if ( ($record->{EventSource} // q{}) eq 'aws:sns' ) {
-       $record = decode_json($record->{Sns}{Message});
-     }
-
-     my $event_name = $record->{eventName} // 'unknown';
-     my $handler    = $DISPATCH{$event_name} // \&on_unhandled;
-
-     $self->$handler($record);
-   }
-
-   return encode_json({ status => 'ok' });
- }
-
- sub on_object_created {
-   my ($self, $record) = @_;
-   my $bucket = $record->{s3}{bucket}{name};
-   my $key    = $record->{s3}{object}{key};
-   $self->get_logger->info("created: s3://$bucket/$key");
- }
-
- sub on_object_removed {
-   my ($self, $record) = @_;
-   my $bucket = $record->{s3}{bucket}{name};
-   my $key    = $record->{s3}{object}{key};
-   $self->get_logger->info("removed: s3://$bucket/$key");
- }
-
- sub on_unhandled {
-   my ($self, $record) = @_;
-   $self->get_logger->warn(
-     sprintf 'unhandled event type: %s', $record->{eventName} // 'unknown'
-   );
- }
-
- 1;
-
-The dispatch table approach keeps each event handler focused on a
-single responsibility. Adding support for a new event type requires
-only a new entry in C<%DISPATCH> and a corresponding method —
-the C<handler> method itself never changes.
-
-B<SNS Envelope:> When S3 events are delivered via SNS the S3 event
-record is JSON-encoded inside C<$record-E<gt>{Sns}{Message}>. The
-pattern above unwraps this envelope transparently before dispatching
-so your event handlers always receive a plain S3 event record
-regardless of whether the trigger is S3 directly or SNS.
-
-B<Note:> C<EventSource> (uppercase E) is used by SNS records while
-C<eventSource> (lowercase e) is used by SQS and S3 records directly.
-This inconsistency is in the AWS event structure itself.
-
-=head2 SQS Event Handling
-
-When an SQS queue is configured as a Lambda event source, Lambda
-polls the queue on your behalf and delivers messages directly to
-your handler. B<No SQS client is required in your handler> — Lambda
-handles polling, visibility timeouts, and message deletion
-automatically.
-
-On successful handler completion Lambda deletes the messages from
-the queue. If your handler dies or throws an exception Lambda leaves
-the messages in the queue for retry up to the queue's
-C<maxReceiveCount>, then routes them to the dead letter queue if
-configured.
-
-An SQS event looks like this:
-
- {
-   "Records": [
-     {
-       "messageId": "059f36b4-87a3-44ab-83d2-661975830a7d",
-       "receiptHandle": "AQEBwJnKyrHigUMZj...",
-       "body": "your message body here",
-       "attributes": {
-         "ApproximateReceiveCount": "1",
-         "SentTimestamp": "1545082649183"
-       },
-       "messageAttributes": {},
-       "eventSource": "aws:sqs",
-       "eventSourceARN": "arn:aws:sqs:us-east-1:123456789012:my-queue",
-       "awsRegion": "us-east-1"
-     }
-   ]
- }
-
-The C<body> field is always a string. If your producer sends JSON
-you must decode it explicitly:
-
- use JSON qw(encode_json decode_json);
-
- sub handler {
-   my ($self, $event, $context) = @_;
-
-   for my $record (@{$event->{Records}}) {
-     my $payload = eval { decode_json($record->{body}) }
-                   // { message => $record->{body} };
-
-     $self->get_logger->info("received: $record->{body}");
-     $self->process($payload);
-   }
-
-   return encode_json({ status => 'ok' });
- }
-
-B<SNS to SQS:> If your messages originate from SNS published to an
-SQS queue (the fan-out pattern), the C<body> field contains an SNS
-notification envelope. Unwrap it to get your actual payload:
-
- my $body    = decode_json($record->{body});
- my $payload = decode_json($body->{Message})
-   if $body->{Type} eq 'Notification';
-
-To attach a Lambda function to an SQS queue use C<make
-lambda-sqs-trigger>. The Lambda execution role requires the
-C<AWSLambdaSQSQueueExecutionRole> managed policy — add it to your
-F<policies> file and run C<make update-policies> before creating
-the trigger.
-
-B<Note:> For low-frequency queues (under a few hundred messages per
-day) Lambda is significantly more cost-effective than a long-polling
-daemon on EC2. Lambda charges only for actual invocations and the
-SQS free tier covers millions of requests per month.
 
 =head1 METHODS
 
@@ -757,64 +911,74 @@ SQS free tier covers millions of requests per month.
 
  new(options)
 
-Constructor for the class. Since your class is being instantiated by
-the runtime harness, in practice, you'll never call this directly in
-any of your code. However, your class may override the method in the
-usual way (make sure you call the base class at some point). This
-class subclasses C<Class::Accessor::Fast>.
+Constructor for the runtime object. While you can override this, you
+B<must> call C<SUPER::new>.
 
-C<options> is a hash reference of possible options as described below:
-
-=over 10
+=over 4
 
 =item loglevel
 
-L<Log::Log4perl> log level. One of:
+Sets the C<Log::Log4perl> level (fatal, error, warn, info, debug,
+trace). Defaults to C<info> or the value of the C<LOG_LEVEL>
+environment variable.
 
- fatal
- error
- warn
- info
- debug
- trace
+=item timeout
 
-Default: C<info>
+The HTTP timeout for communicating with the Runtime API. Defaults to
+10 seconds.
 
 =back
 
-Example:
+=head2 handler($event, $context)
 
- package Lambda;
- use strict;
- use warnings;
+The entry point for your business logic. By default, this method uses
+the B<Event Framework> to detect the source (SQS, S3, etc.) and
+dispatch to a registered class. If no handler is registered for the
+source, falls back to the appropriate default event class.
 
- use parent qw(Amazon::Lambda::Runtime);
+You can override this method to bypass the event framework entirely
+and handle the raw event hashref directly.
 
- sub new {
-   my ($class, @args) = @_;
-   my $self = $class->SUPER::new(@args);
+Handlers should perform one of these actions:
 
-   # your initialization here
+=over 4
 
-   return $self;
- }
+=item 1. die - Lambda reports a function error
 
- sub handler {
-   my ($self, $event, $context) = @_;
+=item 2. return undef - assumes the handler sent the response itself
 
-   return encode_json({ message => 'Hello World!' });
- }
+=item 3. return a string - sent as the invocation response
 
- 1;
+=item 4. return a coderef - triggers streaming response via C<Amazon::Lambda::Runtime::Writer>
+
+=back
+
+=head2 register_event_handler($source, $class)
+
+Registers a specialized handler class for a specific AWS event source.
+
+=over 4
+
+=item $source
+
+Use the exported constants C<:all> (e.g., C<$EVENT_SQS>, C<$EVENT_S3>).
+
+=item $class
+
+A class that inherits from the corresponding C<Amazon::Lambda::Runtime::Event::*> base class.
+
+=back
 
 =head2 get_logger
 
-Returns a L<Log::Log4perl> logger object. See L</Logging>.
 
-You can pass a string or a code reference to the log methods
-(C<debug>, C<info>, C<warn>, C<error>, C<fatal>). The code reference
-form is preferred for expensive operations since it is only evaluated
-if the current log level warrants it:
+=head2 get_logger
+
+Returns the C<Log::Log4perl> logger instance. It is initialized to
+C<stderr>, which AWS Lambda automatically captures and sends to
+B<CloudWatch Logs>.
+
+Prefer the coderef form to avoid unnecessary computation:
 
  $self->get_logger->debug(sub { Dumper($event) });
 
@@ -822,93 +986,59 @@ if the current log level warrants it:
 
  run()
 
-Executes the event loop, retrieving events from the Lambda Runtime
-API and invoking the handler for each. Sends the response or error
-back to the Lambda service after each invocation.
+The main event loop. Polls for events and invokes the handler for each.
 
 =head2 next_event
 
  next_event()
 
-Implements the Lambda Runtime API protocol by polling for the next
-event. As an optimization, Lambda may reuse the same execution
-environment for multiple invocations. This means state stored in
-package variables or module-level data persists between invocations
-within the same environment — use this to cache expensive
-initialization such as database connections or credential objects.
-
-This method is used internally and should not be called from your
-handler code. It returns the decoded event hashref.
-
-=head2 handler
-
- handler(event, context)
-
-Your class must provide its own C<handler()> method and return a
-response string (typically JSON). The base class implementation sends
-a C<NoHandlerDefinedException> error to the Lambda service.
-
-Anything written to C<STDERR> is captured in the CloudWatch log
-stream for this Lambda. Throwing an exception from your handler
-causes Lambda to report a function error — use
-C<send_invocation_error()> for more graceful error reporting.
+Internal. Polls the Lambda Runtime API for the next event. State
+stored in package variables persists between warm invocations - use
+this to cache database connections or credential objects.
 
 =head2 send_invocation_response
 
- send_invocation_response(response)
+ send_invocation_response($response)
 
-Used internally to send the response string back to the Lambda
-service.
+Internal. Sends the response string to the Lambda service.
+
+=head2 send_streaming_response
+
+ send_streaming_response($coderef)
+
+Internal. Called automatically when the handler returns a coderef.
+Opens a raw TCP connection to the Runtime API and streams chunks via
+C<Amazon::Lambda::Runtime::Writer>. See L</Streaming Responses>.
 
 =head2 send_invocation_error
 
- send_invocation_error(error-message, error-type)
+ send_invocation_error($message, $type)
 
-Sends an error message and error type to the Lambda service. This is
-the preferred way of signaling errors rather than throwing an
-exception, as it allows you to provide a structured error type
-alongside the message.
+Sends a structured error to the Lambda service. Preferred over
+throwing an exception for graceful error reporting.
 
 =head2 send_init_error
 
- send_init_error(error-message, error-type)
+ send_init_error($message, $type)
 
-Reports an initialization error to the Lambda service. Call this
-from your C<new()> override if initialization fails and the function
-should not be invoked.
+Reports an initialization error. Call from your C<new()> override if
+initialization fails and the function should not be invoked.
 
 =head1 NOTES
 
 =head2 Logging
 
-Any output to C<STDERR> is captured in the CloudWatch log stream for
-the Lambda. For better log messages use the internal logging system
-which outputs in a more CloudWatch-friendly format:
+Output to C<STDERR> is captured in the CloudWatch log stream. Use the
+internal logger for structured, CloudWatch-friendly output:
 
- $self->get_logger->debug("a log message");
- $self->get_logger->info(sub { Dumper($event) });
+ $self->get_logger->info("a message");
+ $self->get_logger->debug(sub { Dumper($event) });
 
-Available log levels, from least to most verbose:
+Log levels from least to most verbose: C<fatal>, C<error>, C<warn>,
+C<info>, C<debug>, C<trace>. Default is C<info>.
 
-=over 5
-
-=item * fatal
-
-=item * error
-
-=item * warn
-
-=item * info
-
-=item * debug
-
-=item * trace
-
-=back
-
-By default logging is at the C<info> level. Set the C<LOG_LEVEL>
-environment variable in the Lambda function configuration to change
-it:
+Set the C<LOG_LEVEL> environment variable in your Lambda configuration
+to change the level at runtime:
 
  aws lambda update-function-configuration \
      --function-name my-function \
@@ -916,14 +1046,7 @@ it:
 
 =head2 Required IAM Permissions
 
-To use the targets in F<Makefile.poc> the AWS identity you are
-operating as must have the following permissions. The simplest
-approach is to attach these to your IAM user or role as an inline
-policy or a custom managed policy.
-
 =head3 ECR
-
-Required for C<make image>, C<make ecr-repo>, and C<make deploy>:
 
  ecr:CreateRepository
  ecr:DescribeRepositories
@@ -933,10 +1056,9 @@ Required for C<make image>, C<make ecr-repo>, and C<make deploy>:
  ecr:InitiateLayerUpload
  ecr:UploadLayerPart
  ecr:CompleteLayerUpload
+ ecr:PutLifecyclePolicy
 
 =head3 IAM
-
-Required for C<make lambda-role> and C<make lambda-policies>:
 
  iam:GetRole
  iam:CreateRole
@@ -945,56 +1067,72 @@ Required for C<make lambda-role> and C<make lambda-policies>:
  iam:ListAttachedRolePolicies
 
 B<Note:> C<iam:PassRole> is frequently overlooked. Its absence
-produces a confusing C<InvalidParameterValueException> stating that
-the role cannot be assumed by Lambda even though the role exists and
-appears correctly configured. Always verify C<iam:PassRole> is
-granted for the role ARN in question.
+produces a confusing C<InvalidParameterValueException> stating the
+role cannot be assumed by Lambda even though the role exists and
+appears correctly configured.
 
 =head3 Lambda
-
-Required for C<make lambda-function>, C<make update-function>,
-C<make lambda-sqs-trigger>, and C<make invoke>:
 
  lambda:GetFunction
  lambda:CreateFunction
  lambda:UpdateFunctionCode
  lambda:UpdateFunctionConfiguration
  lambda:InvokeFunction
- lambda:ListFunctions
  lambda:GetFunctionConfiguration
  lambda:CreateEventSourceMapping
  lambda:ListEventSourceMappings
+ lambda:GetPolicy
+ lambda:AddPermission
+ lambda:CreateFunctionUrlConfig
+ lambda:GetFunctionUrlConfig
 
 =head3 STS
 
-Required for automatic C<AWS_ACCOUNT> resolution when the variable
-is not set in the environment:
-
  sts:GetCallerIdentity
 
-Setting C<AWS_ACCOUNT> in your environment avoids this call entirely:
+Set C<AWS_ACCOUNT> in your environment to avoid this call:
 
  export AWS_ACCOUNT=$(aws sts get-caller-identity \
      --query Account --output text --profile myprofile)
 
 =head3 Additional Permissions for Your Handler
 
-The C<AWSLambdaBasicExecutionRole> managed policy attached by default
-covers only CloudWatch logging. Add any additional policies your
-handler requires to the F<policies> file and run C<make
-update-policies>. See L</The policies File>.
+C<AWSLambdaBasicExecutionRole> covers CloudWatch logging only. Add
+additional policies to the F<policies> file and run
+C<make update-policies>.
+
+Receiving an event from a service does not automatically grant your
+handler permission to call that service's APIs. For example, an S3
+event trigger gives Lambda permission to invoke your function when an
+object is created - it does not grant your function permission to read
+or write objects in that bucket. Similarly, an SQS trigger grants
+Lambda permission to poll the queue - it does not grant permission to
+call other SQS APIs.
+
+The F<policies> file ships with commonly needed managed policies
+pre-commented. Uncomment those you require:
+
+ # S3 access
+ # arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+ # arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+ # SQS access
+ # arn:aws:iam::aws:policy/AmazonSQSFullAccess
+
+B<Note:> IAM policies grant access at the account level but individual
+S3 buckets may have their own resource-based bucket policies that
+restrict access further. If your Lambda has the correct IAM policy but
+still receives C<AccessDenied> errors accessing a specific bucket,
+check the bucket policy - it may explicitly deny access to your Lambda
+execution role regardless of what IAM allows.
 
 =head2 AWS Reference Implementation
 
-For reference, this is the AWS reference implementation of a custom
-runtime as a shell script:
+For reference, the AWS shell script custom runtime:
 
   #!/bin/sh
-
   set -euo pipefail
-
   source $LAMBDA_TASK_ROOT/"$(echo $_HANDLER | cut -d. -f1).sh"
-
   while true
   do
     HEADERS="$(mktemp)"
@@ -1010,7 +1148,7 @@ runtime as a shell script:
 
 =head1 AUTHOR
 
-Rob Lauer - <rlauer6@comcast.net>
+Rob Lauer - <rlauer@treasurersbriefcase.com>
 
 =head1 LICENSE
 

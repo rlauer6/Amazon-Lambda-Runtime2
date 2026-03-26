@@ -1,3 +1,83 @@
+Thu Mar 19 15:34:45 2026  Rob Lauer  <rclauer@gmail.com>
+
+	[2.0.1]:
+	* README.md: generated
+	* VERSION: bump
+	* requires: remove LWP, LWP::Protocol::https
+	* .gitignore
+	- removed payload.json, queue
+	- added sqs-queue, s3-bucket test-sns, lambda-function-url-invoke-permission
+	- added lambda-function-url, lambda-function-url-permission
+	- added lambda-s3-permission, lambda-s3-trigger, lambda-sqs-trigger
+	- added image-digest
+	- added ecr-lifecycle-policy, ecr-uri
+	- added local/, .\#*, \#*
+	* provides: removed
+	* Makefile
+	- add above to build
+	- add LambdaHandler.pm.in to DEPS
+	* Dockerfile
+	- use carton with stage builds
+	* bin/bootstrap.in
+	- -euo pipefail
+	- LAMBDA_MODULE not MODULE
+	- /usr/local/bin/plambda now
+	* bin/plambda.pl.in
+	- get LAMBDA_MODULE name from environment
+	- set _HANDLER
+	* buildspec.yml
+	- add *.mk files
+	- Makefile.build
+	* LambdaHandler.pm.in: new
+	* cpanfile: new
+	* cpanfile.snapshot: new
+	* ecr-create-repo.mk: new
+	* eventbridge-test.mk: new
+	* payload-sns.json: new
+	* payload.json: new
+	* s3-test.mk: new
+	* sns-test.mk: new
+	* sqs-test.mk: new
+	* streaming-test.mk: new
+	* lib/Amazon/Lambda/Runtime/Event.pm.in: new
+	* lib/Amazon/Lambda/Runtime/Event/Base.pm.in: new
+	* lib/Amazon/Lambda/Runtime/Event/EventBridge.pm.in: new
+	* lib/Amazon/Lambda/Runtime/Event/S3.pm.in: new
+	* lib/Amazon/Lambda/Runtime/Event/SNS.pm.in: new
+	* lib/Amazon/Lambda/Runtime/Event/SQS.pm.in: new
+	* Makefile.build <- Makefile.poc
+	- add Event handlers
+	- default function_name = lambda-handler
+	- replace HelloLambda with LambdaHandler
+	- add LAMBDA_MODULE, LAMBDA_HANDLER build args
+	- +TIMEOUT
+	- capture errors and output in bash variable to create target file
+	- include *.mk files
+	(CLEANFILES): add more target files
+	(ecr-repo):
+	- add a lifecycle policy
+	* lib/Amazon/Lambda/Runtime.pm.in
+	- support overriden handler or new event handlers
+	- support for streaming responses
+	- use HTTP::Tiny instead of LWP
+	- pod updates
+	(register_event_handler): new
+	(handler): modified to support registered event handlers
+	(init_logger): allow log level to be set using environment variable LOG_LEVEL
+	(run)
+	- use IO::Socket::INET to send responses
+	- if response is a CODE ref, stream response
+	(send_streaming_response): new
+	(next_event): changes due to HTTP::Tiny
+	(send_invocation_response): likewise
+	(_post_error): likewise
+	* lib/Amazon/Lambda/Runtime/Context.pm.in
+	- renamed from lib/Amazon/Lambda/Context.pm.in
+	- pod updates
+	(new)
+	- fixes due to HTTP::Tiny change
+	(getRemainingTimeInMillis): fix getter typo
+
 Wed Mar 18 16:22:04 2026  Rob Lauer  <rclauer@gmail.com>
 
 	[2.0.0]:
